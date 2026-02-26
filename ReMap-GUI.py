@@ -15,6 +15,7 @@ from tqdm import tqdm as _original_tqdm
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
 
 try:
     import OpenImageIO as oiio
@@ -132,9 +133,27 @@ def _detect_16bit_from_images(image_dir):
     """Check if existing images in a directory are 16-bit."""
     for ext in ('*.png', '*.tif', '*.tiff'):
         for img_path in Path(image_dir).glob(ext):
-            img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                return img.dtype == np.uint16
+            try:
+                with Image.open(img_path) as img:
+                    if img.mode.startswith("I;16"):
+                        return True
+
+                    if img.format == 'PNG':
+                        with open(img_path, 'rb') as f:
+                            if f.read(8) == b'\x89PNG\r\n\x1a\n':
+                                f.seek(24)
+                                b = f.read(1)
+                                if b and b[0] == 16:
+                                    return True
+
+                    if img.format == 'TIFF' and img.mode in ('RGB', 'RGBA'):
+                        img_cv = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+                        if img_cv is not None and img_cv.dtype == np.uint16:
+                            return True
+
+                    return False
+            except Exception:
+                pass
             break
     return False
 
