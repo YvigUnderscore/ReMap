@@ -381,7 +381,7 @@ class SfMApp(ctk.CTk):
         self.ocio_out_cs = ctk.StringVar(value="")
         self.ocio_spaces = []
         self.has_ocio_lib = HAS_OCIO
-
+        self.use_ocio = ctk.BooleanVar(value=False)
         # Input probing data (for frame count estimates)
         self._video_infos = []    # [{path, duration, native_fps, total_frames}]
         self._rescan_infos = []   # [{path, total_frames}]
