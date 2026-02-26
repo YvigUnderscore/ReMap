@@ -17,6 +17,7 @@ import struct
 import subprocess
 import shutil
 import sys
+import concurrent.futures
 from pathlib import Path
 
 import numpy as np
@@ -319,13 +320,12 @@ def generate_pointcloud_from_depth(
     # Build pose lookup: frame_index → pose
     pose_by_frame = {p["frame"]: p for p in poses}
 
-    n_processed = 0
-    for frame_idx in selected_frames:
+    def process_frame(frame_idx):
         depth_file = depth_dir / f"{frame_idx:06d}.png"
         conf_file = conf_dir / f"{frame_idx:06d}.png"
 
         if not depth_file.exists():
-            continue
+            return None
 
         # Load depth (mode I = 32-bit integer, values in mm typically)
         depth_img = np.array(Image.open(depth_file))
@@ -343,7 +343,7 @@ def generate_pointcloud_from_depth(
             mask = (depth_m > 0.01) & (depth_m < 10.0)
 
         if mask.sum() == 0:
-            continue
+            return None
 
         # Back-project to camera coordinates
         u_masked = uu_flat[mask]
@@ -359,7 +359,7 @@ def generate_pointcloud_from_depth(
         # Transform to world coordinates using pose
         pose = pose_by_frame.get(frame_idx)
         if pose is None:
-            continue
+            return None
 
         R_cw = quat_to_rotation_matrix(pose["qw"], pose["qx"], pose["qy"], pose["qz"])
         t_world = np.array([pose["x"], pose["y"], pose["z"]])
@@ -380,9 +380,18 @@ def generate_pointcloud_from_depth(
             v_rgb = (v_masked / scale_y).astype(int).clip(0, rh - 1)
             colors = rgb_img[v_rgb, u_rgb]
 
-        all_points.append(pts_world)
-        all_colors.append(colors)
-        n_processed += 1
+        return pts_world, colors
+
+    n_processed = 0
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        results = executor.map(process_frame, selected_frames)
+
+    for result in results:
+        if result is not None:
+            pts, cols = result
+            all_points.append(pts)
+            all_colors.append(cols)
+            n_processed += 1
 
     if not all_points:
         logger("  ⚠ Aucun point généré")
