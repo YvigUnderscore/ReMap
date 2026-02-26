@@ -10,14 +10,14 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 
 ```
 ┌─────────────────────┐         ┌─────────────────────┐         ┌──────────────────────┐
-│      📱 ReScan       │   USB   │      🖥️ ReMap        │  output │   🎯 3DGS Training    │
+│      📱 ReScan      │   USB   │      🖥️ ReMap       │  output │   🎯 3DGS Training   │
 │   (iOS Capture)     │ ──────► │  (Desktop Pipeline) │ ──────► │  (Nerfstudio, etc.)  │
 │                     │  copy   │                     │         │                      │
-│ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • images/             │
-│ • RGB video (Log)   │         │ • OCIO color mgmt   │         │ • sparse/0/           │
-│ • ARKit odometry    │         │ • HLoc features     │         │   cameras.bin         │
-│ • Camera intrinsics │         │ • COLMAP / GLOMAP   │         │   images.bin          │
-│                     │         │                     │         │   points3D.bin        │
+│ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • images/            │
+│ • RGB video (Log)   │         │ • OCIO color mgmt   │         │ • sparse/0/          │
+│ • ARKit odometry    │         │ • HLoc features     │         │   cameras.bin        │
+│ • Camera intrinsics │         │ • COLMAP / GLOMAP   │         │   images.bin         │
+│                     │         │                     │         │   points3D.bin       │
 └─────────────────────┘         └─────────────────────┘         └──────────────────────┘
 ```
 
