@@ -71,21 +71,29 @@ This output is directly compatible with:
 
 ## 🚀 Installation
 
-### Prerequisites
+ReMap supports both **Windows** and **Linux** operating systems. We provide scripts to make this as close to a "one-click install" as possible.
+
+### Prerequisites & Dependencies
+
+To run ReMap, your system needs a few core components. Our automated scripts handle downloading and configuring most of these, but here's a breakdown of what happens under the hood:
 
 | Requirement | Details |
 |---|---|
-| **OS** | Linux (Ubuntu 22.04+ recommended) |
-| **GPU** | NVIDIA GPU with CUDA (strongly recommended) |
-| **Python** | 3.10 or 3.12 |
-| **FFmpeg** | Required for video extraction |
-| **COLMAP** | Required (installed via package manager or source) |
-| **GLOMAP** | Optional, faster GPU-based SfM engine |
+| **OS** | Windows 10/11 or Linux (Ubuntu 22.04+ recommended) |
+| **GPU** | NVIDIA GPU with CUDA (strongly recommended for HLoc and GLOMAP) |
+| **Python** | 3.10 or 3.12 (A Virtual Environment is **critical**, see below) |
+| **FFmpeg** | Required for parsing videos and extracting frames |
+| **COLMAP** | The core Structure-from-Motion engine |
+| **GLOMAP** | (Optional) A faster, GPU-accelerated alternative to COLMAP |
 
-### Method 1: Automated Install (Recommended)
+> ⚠️ **The Importance of Virtual Environments (Venv)**
+> Due to the complex nature of photogrammetry and Deep Learning dependencies (like PyTorch with specific CUDA versions, HLoc, pycolmap, etc.), it is perfectly normal and **highly recommended** to use an isolated Python Virtual Environment (`.venv`). This keeps ReMap's dependencies strictly separate from your underlying system or other projects, preventing version conflicts, missing packages, and keeping your OS clean. Our installation scripts handle this automatically.
 
-The `install_all.sh` script handles everything: system dependencies, COLMAP, GLOMAP, Python venv, and pip packages.
+### Method 1: The "One-Click" Automated Install (Recommended)
 
+The `install_all.sh` (Linux) and `install_all.bat` (Windows) scripts handle everything for you: system dependencies, downloading COLMAP/GLOMAP, setting up the Python venv, and installing pip packages. It's essentially a one-click process that sets up the ideal isolated environment.
+
+**For Linux (Ubuntu):**
 ```bash
 # 1. Clone the repository
 git clone https://github.com/YvigUnderscore/ReMap.git
@@ -95,20 +103,32 @@ cd ReMap
 sudo ./install_all.sh
 
 # 3. Launch ReMap
-source .venv/bin/activate
-python3 ReMap-GUI.py
+./launch.sh
 ```
 
-The script performs these steps automatically:
-1. **System packages** — Installs build tools, CMake, Boost, COLMAP dependencies, FFmpeg
-2. **COLMAP** — Installs from system packages (if available)
-3. **GLOMAP** — Clones and builds from source (optional, skipped if already installed)
-4. **Python venv** — Creates a `.venv` virtual environment
-5. **Python deps** — Installs PyTorch (CUDA), HLoc, pycolmap, CustomTkinter, and all requirements
+**For Windows:**
+```bat
+# 1. Clone the repository (or download as ZIP and extract)
+git clone https://github.com/YvigUnderscore/ReMap.git
+cd ReMap
 
-### Method 2: Manual Install
+# 2. Double-click the installer script
+install_all.bat
 
-If you prefer to install components individually:
+# 3. Launch ReMap
+launch.bat
+```
+
+> **Details on the automated install:** The script performs these steps sequentially:
+> 1. **System packages** — Grabs build tools, CMake, Boost, COLMAP dependencies, FFmpeg.
+> 2. **COLMAP** — Installs via system packages (Linux) or downloads pre-built binaries (Windows).
+> 3. **GLOMAP** — Clones and builds from source (Linux) or downloads binaries (Windows).
+> 4. **Python venv** — Creates the isolated `.venv` environment to protect your system.
+> 5. **Python deps** — Installs PyTorch (CUDA), HLoc, pycolmap, CustomTkinter, and all requirements inside the environment.
+
+### Method 2: Manual Install (Linux Example)
+
+If you prefer to install components individually or need a custom setup:
 
 #### Step 1 — System Dependencies
 
