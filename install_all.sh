@@ -148,6 +148,8 @@ install_glomap() {
     echo "Cloning GLOMAP..."
     git clone --recursive https://github.com/colmap/glomap.git
     cd glomap
+    git checkout 99806d0869f802fad218516a2e027793e7ca687d
+    git submodule update --init --recursive
     echo "Configuring GLOMAP..."
     cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
     echo "Building GLOMAP (this may take a while)..."
@@ -196,7 +198,7 @@ install_superglue() {
             rm -rf SuperGluePretrainedNetwork
         fi
         echo "Cloning SuperGlue repository..."
-        sudo -u ${SUDO_USER:-$USER} bash -c "git clone https://github.com/magicleap/SuperGluePretrainedNetwork.git"
+        sudo -u ${SUDO_USER:-$USER} bash -c "git clone https://github.com/magicleap/SuperGluePretrainedNetwork.git && cd SuperGluePretrainedNetwork && git checkout ddcf11f42e7e0732a0c4607648f9448ea8d73590"
     else
         echo -e "${RED}ERROR: Git must be installed first.${NC}"
     fi
