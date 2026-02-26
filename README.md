@@ -62,8 +62,8 @@ output_directory/
 ```
 
 This output is directly compatible with:
+- [Brush](https://github.com/ArthurBrussee/brush) (Recommended) — *Huge thanks to the author!*
 - [Nerfstudio](https://docs.nerf.studio/)
-- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
 - [gsplat](https://github.com/nerfstudio-project/gsplat)
 - Any COLMAP-based training pipeline
 
