@@ -144,7 +144,11 @@ install_colmap() {
 install_glomap() {
     echo -e "\n${GREEN}--- [5/8] GLOMAP ---${NC}"
     BUILD_DIR=$(mktemp -d)
-    cd "$BUILD_DIR"
+    if [ ! -d "$BUILD_DIR" ]; then
+        echo -e "${RED}Failed to create temporary directory.${NC}"
+        return 1
+    fi
+    cd "$BUILD_DIR" || { echo -e "${RED}Failed to enter temporary directory.${NC}"; return 1; }
     echo "Cloning GLOMAP..."
     git clone --recursive https://github.com/colmap/glomap.git
     cd glomap
