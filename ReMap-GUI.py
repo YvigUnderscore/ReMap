@@ -1130,16 +1130,37 @@ class SfMApp(ctk.CTk):
         # 2. Get exact FPS from odometry logic
         try:
             with open(odom_file) as f:
-                lines = [line.strip() for line in f if line.strip()]
-                total = len(lines) - 1  # minus header
+                # header
+                next(f, None)
+
+                first_line = None
+                last_line = None
+                count = 0
+
+                # Find first valid line
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        first_line = line
+                        last_line = line
+                        count = 1
+                        break
+
+                # Count rest
+                if count == 1:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            count += 1
+                            last_line = line
+
+                total = count
                 
                 # If we have enough frames, calculate FPS from timestamps
-                if total > 1:
+                if total > 1 and first_line and last_line:
                     try:
-                        first_line = lines[1].split(',')
-                        last_line = lines[-1].split(',')
-                        t_start = float(first_line[0])
-                        t_end = float(last_line[0])
+                        t_start = float(first_line.split(',')[0])
+                        t_end = float(last_line.split(',')[0])
                         duration = t_end - t_start
                         if duration > 0:
                             odometry_fps = total / duration
@@ -1248,9 +1269,19 @@ class SfMApp(ctk.CTk):
                     self.video_path.set(str(valid_dirs[0]))
                 else:
                     self.video_path.set(f"{len(valid_dirs)} LiDAR datasets selected")
-                # Probe Rescan datasets for frame estimates
-                self._rescan_infos = [self._probe_rescan_dataset(d) for d in valid_dirs]
-                self._update_frame_estimate()
+
+                # Probe Rescan datasets for frame estimates (in background)
+                def probe_rescan():
+                    infos = [self._probe_rescan_dataset(d) for d in valid_dirs]
+
+                    def update_ui():
+                        self._rescan_infos = infos
+                        self._update_frame_estimate()
+
+                    self.after(0, update_ui)
+
+                self.rescan_frame_estimate_label.configure(text="Probing datasets...")
+                threading.Thread(target=probe_rescan, daemon=True).start()
         else:
              d = self._native_file_dialog(mode="directory", title="Select the image folder")
              if d:
