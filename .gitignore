@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+glomap_build/
+SuperGluePretrainedNetwork/
+
+# Temp / test files
+untrunc/
+test_ocio*.py
+inspect_*.py
+repro_paths.py
+check_opts.py
+
+# Sample datasets
+Stray_Scanner_dataset/

@@ -1,0 +1,31 @@
+# --- PYTORCH (Nightly cu128 for RTX 5080 / Blackwell sm_120) ---
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128
+torch>=2.10.0
+torchvision>=0.25.0
+
+# --- BUILD SYSTEM ---
+ninja
+setuptools>=69.5.1
+wheel
+packaging
+
+# --- SFM & HLOC ---
+
+numpy
+scipy
+tqdm
+h5py
+opencv-python-headless
+kornia>=0.7.4  # Includes LightGlue
+
+# --- HLOC (Source) ---
+git+https://github.com/cvg/Hierarchical-Localization.git
+
+# --- PYCOLMAP ---
+pycolmap
+
+# --- GUI & MISC ---
+customtkinter>=5.2.0
+matplotlib
+typing_extensions
+OpenImageIO>=3.0.0
