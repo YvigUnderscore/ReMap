@@ -176,7 +176,7 @@ You can set the `OCIO` environment variable to your config file, or browse for i
 ```bash
 export OCIO=/path/to/your/config.ocio
 ```
-The firewall might be triggered when downloading Apple color-science OCIO config file, you might need to allow it if needed.
+
 ---
 
 ## ⚙️ Usage Guide
