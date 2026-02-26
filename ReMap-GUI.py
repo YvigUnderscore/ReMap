@@ -1381,10 +1381,12 @@ class SfMApp(ctk.CTk):
             elif _current_pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
                 self._log_tagged(tag_prefix, "       ↳ Apple Log to ACEScg 32-bit EXR (for CG) + sRGB Tone Mapped 16-bit PNG (for COLMAP)")
 
-            exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"]
+            exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
             all_images = []
-            for ext in exts:
-                all_images.extend(target_dir.glob(ext))
+            with os.scandir(target_dir) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.lower().endswith(exts):
+                        all_images.append(Path(entry.path))
             
             if not all_images:
                 raise ValueError(f"No images found for color conversion in {target_dir}")
