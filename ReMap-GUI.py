@@ -2081,6 +2081,17 @@ class SfMApp(ctk.CTk):
                         self._log_tagged("[CPU]", f"{ds_tag}   → {_deleted} intermediate PNG "
                                          "file(s) removed")
                         self._log_tagged("[CPU]", f"{ds_tag}   ✓ EXR remapping complete")
+                        # Move images/ into sparse/0/models/0/0/
+                        shutil.move(str(ds_images), str(ds_models))
+                        self._log_tagged("[CPU]", f"{ds_tag}   → images/ moved to {ds_models.relative_to(ds_out)}")
+                        # Delete intermediate files from sparse/0/
+                        for _fname in ["cameras.bin", "database.db", "images.bin", "points3D.bin"]:
+                            _f = ds_sfm / _fname
+                            if _f.exists():
+                                _f.unlink()
+                        for _log_f in ds_sfm.glob("colmap.LOG*"):
+                            _log_f.unlink()
+                        self._log_tagged("[CPU]", f"{ds_tag}   → Intermediate files removed from sparse/0/")
 
                     self._log_tagged("[OK]", f"{ds_tag} ✓ Dataset {ds_name} complete → {ds_out}")
 
@@ -2109,7 +2120,6 @@ class SfMApp(ctk.CTk):
                 self._log_tagged("[CPU]", f"       → {len(input_images)} images found")
                 
                 # Copy images
-                import shutil
                 for img_path in input_images:
                     shutil.copy2(img_path, images_dir / img_path.name)
                 

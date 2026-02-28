@@ -526,6 +526,20 @@ def _run_job(job_id: str):
             logger_fn=job_logger,
         )
 
+        # ── Post-EXR: move images/ to sparse/0/models/0/0/ and clean up sparse/0/ ──
+        if stray_result and stray_result.get("has_exr_source", False):
+            models_final = sfm_dir / "models" / "0" / "0"
+            models_final.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(images_dir), str(models_final))
+            job_logger("  → images/ moved to sparse/0/models/0/0/")
+            for fname in ["cameras.bin", "database.db", "images.bin", "points3D.bin"]:
+                f = sfm_dir / fname
+                if f.exists():
+                    f.unlink()
+            for log_f in sfm_dir.glob("colmap.LOG*"):
+                log_f.unlink()
+            job_logger("  → Intermediate files removed from sparse/0/")
+
         _update_job(job_id, status="completed", progress=100, current_step="Done")
         _append_log(job_id, "Pipeline finished successfully")
 
