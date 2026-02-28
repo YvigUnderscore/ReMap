@@ -378,7 +378,17 @@ def generate_pointcloud_from_depth(
             # Fallback if RGB frame is missing
             colors = np.full((pts_world.shape[0], 3), 128, dtype=np.uint8)
         else:
-            rgb_img = np.array(Image.open(rgb_file))
+            try:
+                rgb_img = np.array(Image.open(rgb_file))
+            except Exception:
+                # Fallback for formats PIL cannot read (e.g. EXR)
+                import OpenImageIO as oiio
+                buf = oiio.ImageBuf(str(rgb_file))
+                if buf.has_error():
+                    raise RuntimeError(f"OpenImageIO could not read {rgb_file}: {buf.geterror()}")
+                pixels = buf.get_pixels(oiio.FLOAT)
+                pixels = np.clip(pixels, 0.0, 1.0)
+                rgb_img = (pixels[..., :3] * 255).astype(np.uint8)
             # Map depth pixel coords to RGB pixel coords
             u_rgb = (u_masked / scale_x).astype(int).clip(0, rw - 1)
             v_rgb = (v_masked / scale_y).astype(int).clip(0, rh - 1)
