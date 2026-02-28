@@ -450,8 +450,6 @@ All settings are optional. Defaults are used when omitted.
 | `stray_approach`         | string  | `"full_sfm"`             | ReScan mode: `full_sfm` or `known_poses` (ARKit)                                                           |
 | `pairing_mode`           | string  | `"exhaustive"`           | Pairing: `sequential` or `exhaustive`                                                                      |
 | `num_threads`            | int     | *(auto: CPU count)*      | Number of CPU threads                                                                                      |
-| `input_colorspace`       | string  |`None`                    | Color Pipeline Input colorspace                                                                            |
-| `output_colorspace`      | string  |`None`                    | Color Pipeline Output colorspace                                                                           |
 | `stray_confidence`       | int     | `2`                      | LiDAR depth confidence threshold (0-2)                                                                     |
 | `stray_depth_subsample`  | int     | `2`                      | Depth frame subsampling factor                                                                             |
 | `stray_gen_pointcloud`   | bool    | `true`                   | Generate 3D point cloud from LiDAR depth                                                                   |
