@@ -144,8 +144,8 @@ ReMap uses **OpenImageIO** to process OpenColorIO workflows, essential for flat/
 | Setting | Video (Standard) | Video (Apple Log) | ReScan (LiDAR) |
 |---|---|---|---|
 | Features / Matcher | SuperPoint / LightGlue | SuperPoint / LightGlue | SuperPoint / LightGlue |
-| SfM Engine | COLMAP / GLOMAP | COLMAP / GLOMAP | COLMAP |
-| OCIO | Off | On (Log → ACEScg) | Off |
+| SfM Engine | GLOMAP | GLOMAP | GLOMAP |
+| OCIO | Off | On (Log → ACEScg) | On (Linear - sRGB → ACEScg) |
 | Image Output | PNG (8-bit) | EXR (16-bit Half) | PNG (8-bit) |
 
 ---
