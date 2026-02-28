@@ -133,6 +133,27 @@ def _rename_images_in_reconstruction(sfm_dir: Path, old_ext: str, new_ext: str,
             logger_fn(f"  ⚠ Could not update sparse model image names: {exc}")
 
 
+def _prefix_images_in_reconstruction(sfm_dir: Path, prefix: str,
+                                      logger_fn=None) -> None:
+    """Prepend a path prefix to image names in a COLMAP sparse reconstruction."""
+    try:
+        import pycolmap
+        recon = pycolmap.Reconstruction(str(sfm_dir))
+        updated = 0
+        for image_id, image in recon.images.items():
+            if not image.name.startswith(prefix):
+                image.name = prefix + image.name
+                updated += 1
+        if updated > 0:
+            recon.write(str(sfm_dir))
+            if logger_fn:
+                logger_fn(f"  → Sparse model updated: {updated} image path(s) prefixed "
+                          f"with '{prefix}'")
+    except Exception as exc:
+        if logger_fn:
+            logger_fn(f"  ⚠ Could not update sparse model image paths: {exc}")
+
+
 def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
                        output_colorspace: str | None, logger_fn=None) -> None:
     """Post-processing: replace intermediate PNGs with colorspace-converted EXR files.
@@ -526,19 +547,22 @@ def _run_job(job_id: str):
             logger_fn=job_logger,
         )
 
-        # ── Post-EXR: move images/ to sparse/0/models/0/0/ and clean up sparse/0/ ──
+        # ── Post-EXR: move images/ to sparse/0/models/0/0/ and update sparse ──
         if stray_result and stray_result.get("has_exr_source", False):
             models_final = sfm_dir / "models" / "0" / "0"
             models_final.mkdir(parents=True, exist_ok=True)
             shutil.move(str(images_dir), str(models_final))
             job_logger("  → images/ moved to sparse/0/models/0/0/")
-            for fname in ["cameras.bin", "database.db", "images.bin", "points3D.bin"]:
+            # Update sparse model so image paths point to new location
+            _prefix_images_in_reconstruction(sfm_dir, "models/0/0/images/", job_logger)
+            # Clean up non-essential intermediate files
+            for fname in ["database.db"]:
                 f = sfm_dir / fname
                 if f.exists():
                     f.unlink()
             for log_f in sfm_dir.glob("colmap.LOG*"):
                 log_f.unlink()
-            job_logger("  → Intermediate files removed from sparse/0/")
+            job_logger("  → Intermediate files cleaned up from sparse/0/")
 
         _update_job(job_id, status="completed", progress=100, current_step="Done")
         _append_log(job_id, "Pipeline finished successfully")
