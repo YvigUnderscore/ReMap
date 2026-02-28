@@ -29,3 +29,4 @@ customtkinter>=5.2.0
 matplotlib
 typing_extensions
 OpenImageIO>=3.0.0
+flask>=3.0.0

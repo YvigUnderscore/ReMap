@@ -28,6 +28,7 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 ## ✨ Features
 
 - **3 Input Modes**: Video files (`.mp4`, `.mov`), Image folders, or [ReScan](https://github.com/YvigUnderscore/ReScan) LiDAR datasets
+- **REST API Server**: Built-in API server for remote dataset upload and processing from the [ReScan](https://github.com/YvigUnderscore/ReScan) iOS app — start from the GUI or run standalone (see [API Documentation](API_DOCUMENTATION.md))
 - **GPU-Accelerated Extraction**: FFmpeg with CUDA hardware decoding when available
 - **16-bit Smart Mode**: Automatically enables 16-bit PNG output when converting to linear colorspaces (ACEScg, scene-linear). Can also be forced manually
 - **OCIO Color Management**: Full OpenColorIO pipeline — convert from camera Log to any working space before SfM
@@ -218,6 +219,23 @@ export OCIO=/path/to/your/config.ocio
 | SfM Engine | COLMAP | COLMAP | COLMAP |
 | 16-bit | Off | Auto (via OCIO) | Off |
 | OCIO | Off | On (Log → ACEScg) | Off |
+
+### API Server Mode
+
+ReMap includes a built-in REST API server so the ReScan iOS app can send datasets directly over the network.
+
+**From the GUI:**
+1. Scroll to **🌐 API Server (ReScan Remote)**
+2. Click **▶ Start Server** — an API key is generated automatically
+3. Use the displayed API key in ReScan to connect
+
+**Standalone server:**
+```bash
+source .venv/bin/activate
+python remap_server.py --port 5000
+```
+
+> 📖 See [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for the full endpoint reference and iOS/Swift integration guide.
 
 ---
 
