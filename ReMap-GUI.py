@@ -234,6 +234,30 @@ class GuiLogHandler(logging.Handler):
             self.handleError(record)
 
 
+class GuiStream:
+    """Redirect sys.stdout/sys.stderr to the GUI console during processing."""
+    def __init__(self, callback):
+        self.callback = callback
+        self._buf = ""
+
+    def write(self, msg):
+        if not msg:
+            return
+        self._buf += msg
+        while '\n' in self._buf:
+            line, self._buf = self._buf.split('\n', 1)
+            if line.strip():
+                self.callback(line)
+
+    def flush(self):
+        if self._buf.strip():
+            self.callback(self._buf)
+            self._buf = ""
+
+    def isatty(self):
+        return False
+
+
 class SectionCard(ctk.CTkFrame):
     """A card-style section with a title, styled border, and inner padding."""
     def __init__(self, master, title, icon="", **kwargs):
@@ -902,6 +926,11 @@ class SfMApp(ctk.CTk):
             text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=11),
             command=self._toggle_console_fullscreen)
         self.btn_console_fs.pack(side="right")
+        ctk.CTkButton(
+            console_header, text="🗑  Clear", width=80, height=24, corner_radius=6,
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=11),
+            command=self._clear_console).pack(side="right", padx=(0, 6))
 
         self.console = ctk.CTkTextbox(main_scroll, height=180,
                                        fg_color=COLORS["console_bg"],
@@ -998,6 +1027,14 @@ class SfMApp(ctk.CTk):
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", on_close)
+
+    # -------------------------------------------------------------------------
+    #  CLEAR CONSOLE
+    # -------------------------------------------------------------------------
+    def _clear_console(self):
+        self.console.configure(state="normal")
+        self.console.delete("1.0", "end")
+        self.console.configure(state="disabled")
 
     # -------------------------------------------------------------------------
     #  CALLBACKS
@@ -1414,6 +1451,28 @@ class SfMApp(ctk.CTk):
         self.console.see("end")
         self.console.configure(state="disabled")
 
+    def _run_ffmpeg_streamed(self, cmd, log_tag):
+        """Run an FFmpeg command and stream its stderr to the GUI console in real-time.
+
+        Returns (proc, stderr_lines, thread) where stderr_lines is a list populated
+        asynchronously by the reader thread. Join the thread before reading stderr_lines
+        to ensure all output has been captured.
+        """
+        stderr_lines = []
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        def _reader():
+            for raw_line in proc.stderr:
+                line = raw_line.strip()
+                if line:
+                    stderr_lines.append(line)
+                    self._log_tagged(log_tag, f"         {line}")
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        return proc, stderr_lines, t
+
     def _set_step(self, index, total=None):
         total = total or len(self.STEPS)
         name = self.STEPS[index] if index < len(self.STEPS) else "Done"
@@ -1564,7 +1623,6 @@ class SfMApp(ctk.CTk):
         threading.Thread(target=self._run_process, daemon=True).start()
 
     def _run_process(self):
-        devnull = None
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         
@@ -1726,9 +1784,9 @@ class SfMApp(ctk.CTk):
             self._log_tagged(tag_prefix, f"       → OK ({success_count}/{total_color} converted)")
 
         try:
-            devnull = open(os.devnull, 'w')
-            sys.stdout = devnull
-            sys.stderr = devnull
+            gui_stream = GuiStream(self._log)
+            sys.stdout = gui_stream
+            sys.stderr = gui_stream
 
             # Monkeypatch tqdm for GUI progress
             GUIProgressTqdm._gui_app = self
@@ -1740,7 +1798,7 @@ class SfMApp(ctk.CTk):
 
             # Custom Logging Handler for Hloc / internal logs
             hloc_logger = logging.getLogger("hloc")
-            hloc_logger.setLevel(logging.INFO)
+            hloc_logger.setLevel(logging.DEBUG)
             
             gui_handler = GuiLogHandler(self._log)
             formatter = logging.Formatter('%(name)s: %(message)s')
@@ -2070,18 +2128,19 @@ class SfMApp(ctk.CTk):
                                 str(images_dir / f"{prefix}_%04d.{ext}")
                             ]
 
-                        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                        proc, stderr_lines, reader_thread = self._run_ffmpeg_streamed(cmd, accel_tag)
                         # Poll so we can kill FFmpeg immediately on cancel
                         while proc.poll() is None:
                             if self._cancelled:
                                 proc.kill()
                                 proc.wait()
+                                reader_thread.join(timeout=2)
                                 raise CancelledError("Processing cancelled by user")
                             time.sleep(0.25)
+                        reader_thread.join(timeout=5)
                         
                         # Fallback: if CUDA failed on first video, retry without it
                         if proc.returncode != 0 and use_cuda and vid_idx == 1:
-                            stderr_out = proc.stderr.read() if proc.stderr else ""
                             self._log_tagged("[CPU]", "       ⚠ CUDA failed, falling back to CPU...")
                             use_cuda = False
                             accel_tag = "[CPU]"
@@ -2106,16 +2165,18 @@ class SfMApp(ctk.CTk):
                                     "-qscale:v", "2",
                                     str(images_dir / f"{prefix}_%04d.{ext}")
                                 ]
-                            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            proc, stderr_lines, reader_thread = self._run_ffmpeg_streamed(cmd, accel_tag)
                             while proc.poll() is None:
                                 if self._cancelled:
                                     proc.kill()
                                     proc.wait()
+                                    reader_thread.join(timeout=2)
                                     raise CancelledError("Processing cancelled by user")
                                 time.sleep(0.25)
+                            reader_thread.join(timeout=5)
                         
                         if proc.returncode != 0:
-                            stderr_out = proc.stderr.read() if proc.stderr else ""
+                            stderr_out = '\n'.join(stderr_lines)
                             self._log_tagged("[ERR]", f"         FFmpeg error: {stderr_out[-500:] if stderr_out else 'unknown'}")
                             raise RuntimeError(f"FFmpeg failed on {video.name}")
                         
@@ -2251,9 +2312,6 @@ class SfMApp(ctk.CTk):
             
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-            
-            if devnull:
-                devnull.close()
             
             if old_tqdm:
                 tqdm_module.tqdm = old_tqdm
