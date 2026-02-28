@@ -1390,7 +1390,12 @@ class SfMApp(ctk.CTk):
             valid_dirs = []
             for d in dirs:
                 p = Path(d)
-                has_rgb = (p / "rgb.mp4").exists() or (p / "rgb.mov").exists()
+                has_rgb_video = (p / "rgb.mp4").exists() or (p / "rgb.mov").exists()
+                has_rgb_seq = (p / "rgb").is_dir() and any(
+                    f.is_file() and f.suffix.lower() in {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+                    for f in (p / "rgb").iterdir()
+                )
+                has_rgb = has_rgb_video or has_rgb_seq
                 has_odom = (p / "odometry.csv").exists()
                 has_cam = (p / "camera_matrix.csv").exists()
                 if has_rgb and has_odom and has_cam:
@@ -1402,7 +1407,7 @@ class SfMApp(ctk.CTk):
                         self._log(f"   → {n_depth} depth maps available")
                 else:
                     missing = []
-                    if not has_rgb: missing.append("rgb.mp4 or rgb.mov")
+                    if not has_rgb: missing.append("rgb.mp4 or rgb.mov or rgb/ image folder")
                     if not has_odom: missing.append("odometry.csv")
                     if not has_cam: missing.append("camera_matrix.csv")
                     self._log(f"⚠ {p.name}: invalid Rescan dataset.")
