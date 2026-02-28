@@ -656,6 +656,7 @@ def convert_stray_to_colmap(
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     frame_to_filename = {}
+    has_exr_source = False
 
     if rgb_video is not None:
         n_frames = extract_rgb_frames(
@@ -701,6 +702,7 @@ def convert_stray_to_colmap(
                 pass
 
         has_exr = any(f.suffix.lower() == ".exr" for f in src_files)
+        has_exr_source = has_exr
         if has_exr:
             import OpenImageIO as oiio  # noqa: PLC0415 — deferred to avoid hard dependency at module level
 
@@ -864,6 +866,8 @@ def convert_stray_to_colmap(
         "mode": mode,
         "frame_to_filename": frame_to_filename,
         "selected_frames": selected_frames,
+        "has_exr_source": has_exr_source,
+        "input_dir": str(input_dir),
     }
 
 

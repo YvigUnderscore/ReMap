@@ -2020,6 +2020,68 @@ class SfMApp(ctk.CTk):
                         )
                         self._log_tagged(sfm_tag, f"{ds_tag}   ✓ Reconstruction complete")
 
+                    # ── EXR remapping (when source was EXR image sequence) ──
+                    if stray_result and stray_result.get("has_exr_source", False):
+                        gui_handler.set_tag("[CPU]")
+                        self._log_tagged("[CPU]", f"{ds_tag} EXR remapping: replacing PNG with "
+                                         "colorspace-converted source EXR files...")
+                        frame_to_filename = stray_result.get("frame_to_filename", {})
+                        src_rgb_dir = stray_dir / "rgb"
+                        # Copy original EXR files to a temp dir, apply color pipeline,
+                        # then move to images/ so apply_color_conversion only sees EXRs.
+                        # The temp dir is populated exclusively from frame_to_filename so
+                        # only the expected frames are moved to images/.
+                        with tempfile.TemporaryDirectory() as _tmpdir:
+                            _tmpdir_path = Path(_tmpdir)
+                            _copied = 0
+                            for _fidx, _png_name in frame_to_filename.items():
+                                _exr_src = src_rgb_dir / f"{_fidx:06d}.exr"
+                                if _exr_src.exists():
+                                    shutil.copy2(_exr_src, _tmpdir_path / f"{_fidx:06d}.exr")
+                                    _copied += 1
+                                else:
+                                    self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Missing source EXR: "
+                                                     f"{_exr_src.name}")
+                            self._log_tagged("[CPU]", f"{ds_tag}   → {_copied} EXR file(s) ready "
+                                             "for color pipeline")
+                            # Apply color pipeline to EXR files only (temp dir)
+                            _current_pipeline = self.color_pipeline.get()
+                            if _current_pipeline != "None":
+                                apply_color_conversion(
+                                    _tmpdir_path, "[CPU]",
+                                    f"{ds_tag}   EXR remapping: applying color pipeline "
+                                    f"({_current_pipeline})...",
+                                )
+                            # Move converted EXR files to images/
+                            for _exr_f in _tmpdir_path.glob("*.exr"):
+                                shutil.move(str(_exr_f), ds_images / _exr_f.name)
+                        # Rename image entries in sparse model (png → exr)
+                        try:
+                            _recon = pycolmap.Reconstruction(str(ds_sfm))
+                            _renamed = 0
+                            for _img_id, _img in _recon.images.items():
+                                if _img.name.endswith(".png"):
+                                    _img.name = _img.name[:-4] + ".exr"
+                                    _renamed += 1
+                            if _renamed > 0:
+                                _recon.write(str(ds_sfm))
+                                self._log_tagged("[CPU]", f"{ds_tag}   → Sparse model updated: "
+                                                 f"{_renamed} image reference(s) renamed "
+                                                 "(.png → .exr)")
+                        except Exception as _exc:
+                            self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not update sparse "
+                                             f"model image names: {_exc}")
+                        # Delete intermediate PNG files
+                        _deleted = 0
+                        for _, _png_name in frame_to_filename.items():
+                            _png_path = ds_images / _png_name
+                            if _png_path.exists():
+                                _png_path.unlink()
+                                _deleted += 1
+                        self._log_tagged("[CPU]", f"{ds_tag}   → {_deleted} intermediate PNG "
+                                         "file(s) removed")
+                        self._log_tagged("[CPU]", f"{ds_tag}   ✓ EXR remapping complete")
+
                     self._log_tagged("[OK]", f"{ds_tag} ✓ Dataset {ds_name} complete → {ds_out}")
 
                 self._log_tagged("[OK]", f"\n✓ SUCCESS — {total_ds} dataset(s) processed independently in: {base_out}")
