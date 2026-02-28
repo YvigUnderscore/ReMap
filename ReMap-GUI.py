@@ -6,6 +6,7 @@ import threading
 import sys
 import multiprocessing
 import subprocess
+import secrets
 import tempfile
 from pathlib import Path
 import os
@@ -365,6 +366,7 @@ class SfMApp(ctk.CTk):
 
         self._cancelled = False
         self._processing = False
+        self._server_process = None  # subprocess.Popen handle for the API server
 
         # --- Variables ---
         self.video_paths = []  # List of Path objects for multi-video
@@ -415,6 +417,22 @@ class SfMApp(ctk.CTk):
         self.workers_label_var = ctk.StringVar(value=f"{default_workers} Threads")
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _on_closing(self):
+        """Terminate the server subprocess (if running) before closing the window."""
+        if self._server_process is not None:
+            self._server_process.terminate()
+            try:
+                self._server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._server_process.kill()
+        if hasattr(self, "_server_log_fp") and self._server_log_fp:
+            try:
+                self._server_log_fp.close()
+            except Exception:
+                pass
+        self.destroy()
 
     # -------------------------------------------------------------------------
     #  UI BUILDING
@@ -775,6 +793,9 @@ class SfMApp(ctk.CTk):
             "When enabled, ReScan uploads are received, processed\n"
             "automatically, and results are available for download.\n\n"
             "The API key is required for authentication (Bearer token).\n"
+            "You can type your own key or click 🔄 Generate for a new one.\n"
+            "The key is locked while the server is running.\n"
+            "Use 🔌 Check to test connectivity (no key required).\n"
             "See API_DOCUMENTATION.md for the full endpoint reference.")
         server_tip.pack(anchor="e", pady=(0, 4))
         server_tip.pack_info_after(card_server.content)
@@ -783,7 +804,7 @@ class SfMApp(ctk.CTk):
         srv_row1.pack(fill="x", pady=(0, 4))
 
         self.server_running = False
-        self._server_thread = None
+        self._server_process = None
         self._server_api_key = None
 
         self.server_port = ctk.IntVar(value=5000)
@@ -801,23 +822,37 @@ class SfMApp(ctk.CTk):
         )
         self.btn_server_toggle.pack(side="left", padx=(0, 12))
 
+        self.btn_server_check = ctk.CTkButton(
+            srv_row1, text="🔌 Check", width=90, height=32, corner_radius=8,
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=12),
+            command=self._check_server_connection,
+        )
+        self.btn_server_check.pack(side="left", padx=(0, 12))
+
         self.server_status_label = ctk.CTkLabel(
             srv_row1, text="● Stopped", text_color=COLORS["text_muted"],
             font=ctk.CTkFont(size=12))
         self.server_status_label.pack(side="left")
 
-        # API Key display row
+        # API Key row — editable before server starts
         srv_row2 = ctk.CTkFrame(card_server.content, fg_color="transparent")
         srv_row2.pack(fill="x", pady=(2, 0))
         ctk.CTkLabel(srv_row2, text="API Key", text_color=COLORS["text_secondary"],
                      font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
-        self.server_key_var = ctk.StringVar(value="(start server to generate)")
+        self.server_key_var = ctk.StringVar(value=secrets.token_urlsafe(32))
         self.server_key_entry = ctk.CTkEntry(
             srv_row2, textvariable=self.server_key_var, width=380,
             fg_color=COLORS["bg_dark"], border_color=COLORS["border"],
-            text_color=COLORS["text_primary"], state="disabled",
+            text_color=COLORS["text_primary"], state="normal",
             font=ctk.CTkFont(family="Consolas, monospace", size=11))
         self.server_key_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            srv_row2, text="🔄 Generate", width=100, height=28, corner_radius=6,
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=11),
+            command=self._generate_api_key,
+        ).pack(side="left")
 
         # --- Progress Bar ---
         progress_frame = ctk.CTkFrame(main_scroll, fg_color="transparent")
@@ -1412,18 +1447,50 @@ class SfMApp(ctk.CTk):
         self.after(0, lambda: self.btn_cancel.configure(state="disabled"))
         self._processing = False
 
+    def _generate_api_key(self):
+        """Generate and display a new random API key (only when server is stopped)."""
+        if not self.server_running:
+            self.server_key_var.set(secrets.token_urlsafe(32))
+
+    def _check_server_connection(self):
+        """Test connectivity to the local server via the public /health endpoint."""
+        try:
+            port = self.server_port.get()
+        except Exception:
+            self._log_tagged("[SERVER]", "❌ Invalid port number")
+            return
+
+        def _do_check():
+            try:
+                import urllib.request
+                url = f"http://127.0.0.1:{port}/api/v1/health"
+                with urllib.request.urlopen(url, timeout=3) as resp:
+                    self.after(0, lambda: self._log_tagged(
+                        "[SERVER]", f"✅ Server reachable on port {port} (HTTP {resp.status})"))
+            except Exception as exc:
+                self.after(0, lambda: self._log_tagged(
+                    "[SERVER]", f"❌ Server not reachable on port {port}: {exc}"))
+
+        threading.Thread(target=_do_check, daemon=True).start()
+
     def _toggle_server(self):
         """Start or stop the built-in API server."""
         if self.server_running:
-            # Stop is not cleanly supported by Flask dev server in a thread,
-            # but the daemon thread will die when the app exits.
             self.server_running = False
             self.btn_server_toggle.configure(text="▶  Start Server",
                                              fg_color=COLORS["accent_blue"])
             self.server_status_label.configure(text="● Stopped",
                                                text_color=COLORS["text_muted"])
-            self.server_key_var.set("(start server to generate)")
-            self._log_tagged("[SERVER]", "API server stopped (will shut down with app)")
+            self._log_tagged("[SERVER]", "API server stopped")
+            if self._server_process is not None:
+                self._server_process.terminate()
+                try:
+                    self._server_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._server_process.kill()
+                self._server_process = None
+            # Re-enable key entry so user can change it before next start
+            self.server_key_entry.configure(state="normal")
         else:
             try:
                 port = self.server_port.get()
@@ -1431,18 +1498,36 @@ class SfMApp(ctk.CTk):
                 self._log_tagged("[SERVER]", "❌ Invalid port number")
                 return
 
-            from remap_server import start_server_background
-            self._server_thread, self._server_api_key = start_server_background(
-                host="0.0.0.0", port=port
+            api_key = self.server_key_var.get().strip()
+            if not api_key:
+                api_key = secrets.token_urlsafe(32)
+                self.server_key_var.set(api_key)
+
+            server_script = Path(__file__).resolve().parent / "remap_server.py"
+            if not server_script.exists():
+                self._log_tagged("[SERVER]", f"❌ Server script not found: {server_script}")
+                return
+
+            log_path = Path(tempfile.gettempdir()) / "remap_server.log"
+            self._server_log_fp = open(log_path, "w")  # noqa: SIM115
+            self._server_process = subprocess.Popen(
+                [sys.executable, str(server_script),
+                 "--host", "0.0.0.0", "--port", str(port),
+                 "--api-key", api_key],
+                stdout=self._server_log_fp,
+                stderr=subprocess.STDOUT,
             )
+            self._server_api_key = api_key
             self.server_running = True
+            # Lock key entry while server is running to avoid confusion
+            self.server_key_entry.configure(state="disabled")
             self.btn_server_toggle.configure(text="■  Stop Server",
                                              fg_color=COLORS["error"])
             self.server_status_label.configure(text=f"● Running on port {port}",
                                                text_color=COLORS["success"])
-            self.server_key_var.set(self._server_api_key)
             self._log_tagged("[SERVER]", f"API server started on http://0.0.0.0:{port}")
-            self._log_tagged("[SERVER]", f"API Key: {self._server_api_key}")
+            self._log_tagged("[SERVER]", f"API Key: {api_key}")
+            self._log_tagged("[SERVER]", f"Server log: {log_path}")
 
     def _cancel_process(self):
         """Set the cancellation flag. The processing thread checks it between steps."""
