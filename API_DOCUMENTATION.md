@@ -19,6 +19,7 @@ Complete REST API reference for the **ReMap Server**, designed for integration w
   - [List Jobs](#list-jobs)
   - [Cancel Job](#cancel-job)
 - [Processing Settings](#processing-settings)
+- [Colorspace Values](#colorspace-values)
 - [Error Handling](#error-handling)
 - [Workflow Example](#workflow-example)
 - [iOS / Swift Integration Guide](#ios--swift-integration-guide)
@@ -201,6 +202,8 @@ POST /api/v1/process
 ```json
 {
   "dataset_id": "a1b2c3d4e5f6",
+  "input_colorspace": "srgb",
+  "output_colorspace": "acescg",
   "settings": {
     "fps": 4.0,
     "feature_type": "superpoint_aachen",
@@ -221,6 +224,15 @@ POST /api/v1/process
 
 All fields in `settings` are **optional** — defaults are applied automatically. See [Processing Settings](#processing-settings) for details.
 
+**Top-level fields**:
+
+| Field                | Type   | Required | Description                                                                                                    |
+|----------------------|--------|----------|----------------------------------------------------------------------------------------------------------------|
+| `dataset_id`         | string | Yes      | Dataset identifier returned by `/upload`                                                                       |
+| `input_colorspace`   | string | No       | Colorspace of the captured images. If provided, images are converted from this space to the internal linear space before processing. See [Colorspace Values](#colorspace-values). |
+| `output_colorspace`  | string | No       | Desired colorspace for the output images. If provided, images are converted from the internal linear space to this space after reconstruction. See [Colorspace Values](#colorspace-values). |
+| `settings`           | object | No       | Processing settings (see [Processing Settings](#processing-settings))                                          |
+
 **Response** `202 Accepted`:
 ```json
 {
@@ -232,10 +244,10 @@ All fields in `settings` are **optional** — defaults are applied automatically
 
 **Error responses**:
 
-| Code | Reason                                   |
-|------|------------------------------------------|
-| 400  | Missing `dataset_id` or invalid JSON     |
-| 404  | Dataset not found (upload first)         |
+| Code | Reason                                              |
+|------|-----------------------------------------------------|
+| 400  | Missing `dataset_id`, invalid JSON, or unsupported colorspace value |
+| 404  | Dataset not found (upload first)                    |
 
 ---
 
@@ -451,6 +463,43 @@ All settings are optional. Defaults are used when omitted.
 | Outdoor scene            | 3-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
 | Small object / turntable | 2-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
 | Fast-moving scene        | 5-20 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
+
+---
+
+## Colorspace Values
+
+The `input_colorspace` and `output_colorspace` top-level fields accept the following string values (case-insensitive):
+
+| Value        | Description                                            |
+|--------------|--------------------------------------------------------|
+| `linear`     | Linear light sRGB — the pipeline's assumed internal working space |
+| `srgb`       | Display sRGB (gamma-corrected, standard monitor output) |
+| `acescg`     | ACEScg — ACES CG rendering/compositing working space   |
+| `aces2065-1` | ACES2065-1 — ACES interchange / archive format         |
+| `rec709`     | Rec. 709 — broadcast/HD television standard            |
+| `log`        | Generic logarithmic encoding                           |
+| `raw`        | No colorspace interpretation (pass-through)            |
+
+### How colorspace conversion works
+
+- **`input_colorspace`**: If provided, extracted image frames are converted **from** the specified space **to** the internal linear space before feature extraction and SfM reconstruction. If omitted, images are used as-is (assumed to already be in the internal working space).
+- **`output_colorspace`**: If provided, the output images are converted **from** the internal linear space **to** the specified space after reconstruction is complete. If omitted, output images remain in the internal working space.
+- You can specify `input_colorspace` and `output_colorspace` independently — they do not need to match.
+
+### Example: sRGB input → ACEScg output
+
+```json
+{
+  "dataset_id": "a1b2c3d4e5f6",
+  "input_colorspace": "srgb",
+  "output_colorspace": "acescg",
+  "settings": {
+    "fps": 4.0,
+    "feature_type": "superpoint_aachen",
+    "stray_approach": "full_sfm"
+  }
+}
+```
 
 ---
 
