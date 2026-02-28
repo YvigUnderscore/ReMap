@@ -640,14 +640,20 @@ def _run_job(job_id: str):
                           "cameras.txt", "images.txt", "points3D.txt"]:
                 f = sfm_dir / fname
                 if f.exists():
-                    f.unlink()
+                    try:
+                        f.unlink()
+                    except PermissionError:
+                        job_logger(f"  ⚠ Could not remove {f.name} (file in use) — skipping")
             # Remove stale SfM output left in models/0/ (GLOMAP copies, not moves)
             sfm_model0 = sfm_dir / "models" / "0"
             if sfm_model0.is_dir():
                 for stale in ("cameras.bin", "images.bin", "points3D.bin"):
                     sf = sfm_model0 / stale
                     if sf.exists():
-                        sf.unlink()
+                        try:
+                            sf.unlink()
+                        except PermissionError:
+                            job_logger(f"  ⚠ Could not remove {sf.name} (file in use) — skipping")
             for log_f in sfm_dir.glob("colmap.LOG*"):
                 try:
                     log_f.unlink()
