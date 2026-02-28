@@ -1665,7 +1665,7 @@ class SfMApp(ctk.CTk):
             elif _current_pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
                 self._log_tagged(tag_prefix, "       ↳ Apple Log to ACEScg 32-bit EXR (for CG) + sRGB Tone Mapped 16-bit PNG (for COLMAP)")
 
-            exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+            exts = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff")
             all_images = []
             with os.scandir(target_dir) as entries:
                 for entry in entries:
