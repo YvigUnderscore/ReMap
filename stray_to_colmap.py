@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# Supported image file extensions for pre-extracted image sequences
+_IMAGE_EXTS = {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PARSING HELPERS
@@ -598,8 +601,18 @@ def convert_stray_to_colmap(
         if (input_dir / vname).exists():
             rgb_video = input_dir / vname
             break
-    if rgb_video is None:
-        raise FileNotFoundError(f"Fichier vidéo manquant : rgb.mp4 ou rgb.mov dans {input_dir}")
+
+    # Check for pre-extracted image sequence in rgb/ directory
+    rgb_dir = input_dir / "rgb"
+    has_image_sequence = rgb_dir.is_dir() and any(
+        f.is_file() and f.suffix.lower() in _IMAGE_EXTS for f in rgb_dir.iterdir()
+    )
+
+    if rgb_video is None and not has_image_sequence:
+        raise FileNotFoundError(
+            f"Fichier vidéo manquant : rgb.mp4 ou rgb.mov dans {input_dir}, "
+            f"et aucune séquence d'images dans {rgb_dir}"
+        )
 
     logger("═" * 60)
     logger(f"  RESCAN → COLMAP  (mode: {mode})")
@@ -630,41 +643,82 @@ def convert_stray_to_colmap(
     # ── 3. Extract RGB frames ────────────────────────────────────────────
     logger("\n[3/5] Extraction des frames RGB...")
     images_dir = output_dir / "images"
-    n_frames = extract_rgb_frames(
-        rgb_video, images_dir,
-        subsample=subsample, use_cuda=use_cuda,
-        image_prefix=image_prefix, logger=logger
-    )
-
-    if cancel_check:
-        cancel_check()
-
-    # Build frame → filename mapping (only this dataset's files via prefix glob)
-    extracted_files = sorted(images_dir.glob(f"{image_prefix}*.png"))
-    # FFmpeg numbers from 000001.png, our frames are 0-indexed
-    # With select filter: output frame i corresponds to selected_frames[i]
+    images_dir.mkdir(parents=True, exist_ok=True)
     frame_to_filename = {}
 
-    for i, frame_idx in enumerate(selected_frames):
-        if i < len(extracted_files):
-            frame_to_filename[frame_idx] = extracted_files[i].name
+    if rgb_video is not None:
+        n_frames = extract_rgb_frames(
+            rgb_video, images_dir,
+            subsample=subsample, use_cuda=use_cuda,
+            image_prefix=image_prefix, logger=logger
+        )
 
-    # Delete any extracted file that wasn't mapped (e.g. video recorded longer than odometry)
-    mapped_files = set(frame_to_filename.values())
-    deleted_count = 0
-    for f in extracted_files:
-        if f.name not in mapped_files:
-            f.unlink()
-            deleted_count += 1
-            
-    if deleted_count > 0:
-        logger(f"  → {deleted_count} frames excédentaires supprimées (vidéo plus longue que l'odométrie).")
+        if cancel_check:
+            cancel_check()
+
+        # Build frame → filename mapping (only this dataset's files via prefix glob)
+        extracted_files = sorted(images_dir.glob(f"{image_prefix}*.png"))
+        # FFmpeg numbers from 000001.png, our frames are 0-indexed
+        # With select filter: output frame i corresponds to selected_frames[i]
+        for i, frame_idx in enumerate(selected_frames):
+            if i < len(extracted_files):
+                frame_to_filename[frame_idx] = extracted_files[i].name
+
+        # Delete any extracted file that wasn't mapped (e.g. video recorded longer than odometry)
+        mapped_files = set(frame_to_filename.values())
+        deleted_count = 0
+        for f in extracted_files:
+            if f.name not in mapped_files:
+                f.unlink()
+                deleted_count += 1
+
+        if deleted_count > 0:
+            logger(f"  → {deleted_count} frames excédentaires supprimées (vidéo plus longue que l'odométrie).")
+    else:
+        # Use pre-extracted image sequence from rgb/ directory
+        logger(f"  → Séquence d'images dans rgb/ détectée — copie vers images/ (subsample={subsample})")
+        src_files = sorted(
+            f for f in rgb_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+        )
+        # Map frame index (parsed from stem) to source file
+        src_by_frame = {}
+        for f in src_files:
+            try:
+                src_by_frame[int(f.stem)] = f
+            except ValueError:
+                pass
+
+        copied = 0
+        for frame_idx in selected_frames:
+            if frame_idx in src_by_frame:
+                src = src_by_frame[frame_idx]
+                dst_name = f"{image_prefix}{frame_idx:06d}{src.suffix}"
+                dst = images_dir / dst_name
+                if not dst.exists():
+                    shutil.copy2(src, dst)
+                frame_to_filename[frame_idx] = dst_name
+                copied += 1
+
+        n_frames = copied
+        logger(f"  → {n_frames} frames copiées depuis rgb/")
+
+        if cancel_check:
+            cancel_check()
 
     # Detect image resolution
     if frame_to_filename:
         first_frame_name = next(iter(frame_to_filename.values()))
-        sample = Image.open(images_dir / first_frame_name)
-        img_w, img_h = sample.size
+        first_frame_path = images_dir / first_frame_name
+        try:
+            sample = Image.open(first_frame_path)
+            img_w, img_h = sample.size
+        except Exception:
+            # Fallback for formats PIL cannot read (e.g. EXR on older Pillow)
+            import OpenImageIO as oiio
+            buf = oiio.ImageBuf(str(first_frame_path))
+            spec = buf.spec()
+            img_w, img_h = spec.width, spec.height
     else:
         raise RuntimeError("Aucune frame extraite !")
 
