@@ -133,7 +133,7 @@ ReMap uses **OpenImageIO** to process OpenColorIO workflows, essential for flat/
 
 ### ReScan (LiDAR) Mode
 1. Select **Rescan (LiDAR)** mode.
-2. Browse to the dataset containing `rgb.mp4` (Apple ProRes Log), `odometry.csv`, and `camera_matrix.csv`.
+2. Browse to the dataset containing `rgb.mp4` (Apple ProRes Log) or already exported frames into `/images`, `odometry.csv`, and `camera_matrix.csv`.
 3. Choose processing approach:
    - **Full SfM (Approach B)** — Runs complete SfM. Most robust.
    - **ARKit Poses (Approach A)** — Uses known poses for fast triangulation.
