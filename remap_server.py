@@ -20,6 +20,7 @@ import multiprocessing
 import os
 import secrets
 import shutil
+import struct
 import tempfile
 import threading
 import time
@@ -112,22 +113,82 @@ def _append_log(job_id: str, message: str):
             )
 
 
+def _read_images_bin(bin_path: Path) -> list[dict]:
+    """Parse a COLMAP images.bin into a list of image dicts."""
+    images = []
+    with open(bin_path, "rb") as f:
+        (num_images,) = struct.unpack("<Q", f.read(8))
+        for _ in range(num_images):
+            (image_id,) = struct.unpack("<i", f.read(4))
+            qw, qx, qy, qz = struct.unpack("<4d", f.read(32))
+            tx, ty, tz = struct.unpack("<3d", f.read(24))
+            (camera_id,) = struct.unpack("<i", f.read(4))
+            # Read null-terminated name
+            name_chars = []
+            while True:
+                ch = f.read(1)
+                if ch == b"\x00" or ch == b"":
+                    break
+                name_chars.append(ch)
+            name = b"".join(name_chars).decode("utf-8")
+            # Read 2D points
+            (num_points2d,) = struct.unpack("<Q", f.read(8))
+            # Each point2D: x(double), y(double), point3d_id(int64)
+            points2d_data = f.read(num_points2d * 24) if num_points2d > 0 else b""
+            images.append({
+                "image_id": image_id,
+                "qw": qw, "qx": qx, "qy": qy, "qz": qz,
+                "tx": tx, "ty": ty, "tz": tz,
+                "camera_id": camera_id,
+                "name": name,
+                "num_points2d": num_points2d,
+                "points2d_data": points2d_data,
+            })
+    return images
+
+
+def _write_images_bin(bin_path: Path, images: list[dict]) -> None:
+    """Write a list of image dicts back to COLMAP images.bin."""
+    with open(bin_path, "wb") as f:
+        f.write(struct.pack("<Q", len(images)))
+        for img in images:
+            f.write(struct.pack("<i", img["image_id"]))
+            f.write(struct.pack("<4d", img["qw"], img["qx"], img["qy"], img["qz"]))
+            f.write(struct.pack("<3d", img["tx"], img["ty"], img["tz"]))
+            f.write(struct.pack("<i", img["camera_id"]))
+            f.write(img["name"].encode("utf-8") + b"\x00")
+            f.write(struct.pack("<Q", img["num_points2d"]))
+            if img["points2d_data"]:
+                f.write(img["points2d_data"])
+
+
 def _rename_images_in_reconstruction(sfm_dir: Path, old_ext: str, new_ext: str,
                                       logger_fn=None) -> None:
-    """Rename image file extensions in a COLMAP sparse reconstruction."""
+    """Rename image file extensions in a COLMAP sparse reconstruction.
+
+    Directly reads/writes images.bin to bypass pycolmap's read-only
+    image.name property.
+    """
+    bin_path = sfm_dir / "images.bin"
+    if not bin_path.exists():
+        if logger_fn:
+            logger_fn(f"  ⚠ images.bin not found in {sfm_dir}, cannot rename")
+        return
     try:
-        import pycolmap
-        recon = pycolmap.Reconstruction(str(sfm_dir))
+        images = _read_images_bin(bin_path)
         renamed = 0
-        for image_id, image in recon.images.items():
-            if image.name.endswith(old_ext):
-                image.name = image.name[:-len(old_ext)] + new_ext
+        for img in images:
+            if img["name"].endswith(old_ext):
+                img["name"] = img["name"][:-len(old_ext)] + new_ext
                 renamed += 1
         if renamed > 0:
-            recon.write(str(sfm_dir))
+            _write_images_bin(bin_path, images)
             if logger_fn:
                 logger_fn(f"  → Sparse model updated: {renamed} image reference(s) renamed "
                           f"({old_ext} → {new_ext})")
+        else:
+            if logger_fn:
+                logger_fn(f"  ⚠ No images with extension '{old_ext}' found in sparse model")
     except Exception as exc:
         if logger_fn:
             logger_fn(f"  ⚠ Could not update sparse model image names: {exc}")
@@ -135,17 +196,25 @@ def _rename_images_in_reconstruction(sfm_dir: Path, old_ext: str, new_ext: str,
 
 def _prefix_images_in_reconstruction(sfm_dir: Path, prefix: str,
                                       logger_fn=None) -> None:
-    """Prepend a path prefix to image names in a COLMAP sparse reconstruction."""
+    """Prepend a path prefix to image names in a COLMAP sparse reconstruction.
+
+    Directly reads/writes images.bin to bypass pycolmap's read-only
+    image.name property.
+    """
+    bin_path = sfm_dir / "images.bin"
+    if not bin_path.exists():
+        if logger_fn:
+            logger_fn(f"  ⚠ images.bin not found in {sfm_dir}, cannot prefix")
+        return
     try:
-        import pycolmap
-        recon = pycolmap.Reconstruction(str(sfm_dir))
+        images = _read_images_bin(bin_path)
         updated = 0
-        for image in recon.images.values():
-            if not image.name.startswith(prefix):
-                image.name = prefix + image.name
+        for img in images:
+            if not img["name"].startswith(prefix):
+                img["name"] = prefix + img["name"]
                 updated += 1
         if updated > 0:
-            recon.write(str(sfm_dir))
+            _write_images_bin(bin_path, images)
             if logger_fn:
                 logger_fn(f"  → Sparse model updated: {updated} image path(s) prefixed "
                           f"with '{prefix}'")
@@ -572,7 +641,13 @@ def _run_job(job_id: str):
                     if sf.exists():
                         sf.unlink()
             for log_f in sfm_dir.glob("colmap.LOG*"):
-                log_f.unlink()
+                try:
+                    log_f.unlink()
+                except PermissionError:
+                    # On Windows, COLMAP/GLOMAP may still hold the log file
+                    # open for a brief moment after the process exits.
+                    # This is non-critical: skip the file silently.
+                    job_logger(f"  ⚠ Could not remove {log_f.name} (file in use) — skipping")
             job_logger("  → Intermediate files cleaned up from sparse/0/")
 
         _update_job(job_id, status="completed", progress=100, current_step="Done")
