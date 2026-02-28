@@ -765,6 +765,60 @@ class SfMApp(ctk.CTk):
                                        fg_color=COLORS["border"], height=16)
         slider_workers.pack(fill="x", pady=(2, 0))
 
+        # --- 5. API Server ---
+        card_server = SectionCard(main_scroll, "API Server (ReScan Remote)", icon="🌐")
+        card_server.pack(fill="x", pady=(0, 10))
+
+        server_tip = InfoTooltip(card_server.content,
+            "Start a local REST API server so the ReScan iOS app\n"
+            "can send datasets directly to this machine over the network.\n\n"
+            "When enabled, ReScan uploads are received, processed\n"
+            "automatically, and results are available for download.\n\n"
+            "The API key is required for authentication (Bearer token).\n"
+            "See API_DOCUMENTATION.md for the full endpoint reference.")
+        server_tip.pack(anchor="e", pady=(0, 4))
+        server_tip.pack_info_after(card_server.content)
+
+        srv_row1 = ctk.CTkFrame(card_server.content, fg_color="transparent")
+        srv_row1.pack(fill="x", pady=(0, 4))
+
+        self.server_running = False
+        self._server_thread = None
+        self._server_api_key = None
+
+        self.server_port = ctk.IntVar(value=5000)
+        ctk.CTkLabel(srv_row1, text="Port", text_color=COLORS["text_secondary"],
+                     font=ctk.CTkFont(size=13)).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(srv_row1, textvariable=self.server_port, width=80,
+                     fg_color=COLORS["bg_dark"], border_color=COLORS["border"],
+                     text_color=COLORS["text_primary"]).pack(side="left", padx=(0, 12))
+
+        self.btn_server_toggle = ctk.CTkButton(
+            srv_row1, text="▶  Start Server", width=160, height=32, corner_radius=8,
+            fg_color=COLORS["accent_blue"], hover_color=COLORS["accent_purple"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._toggle_server,
+        )
+        self.btn_server_toggle.pack(side="left", padx=(0, 12))
+
+        self.server_status_label = ctk.CTkLabel(
+            srv_row1, text="● Stopped", text_color=COLORS["text_muted"],
+            font=ctk.CTkFont(size=12))
+        self.server_status_label.pack(side="left")
+
+        # API Key display row
+        srv_row2 = ctk.CTkFrame(card_server.content, fg_color="transparent")
+        srv_row2.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(srv_row2, text="API Key", text_color=COLORS["text_secondary"],
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+        self.server_key_var = ctk.StringVar(value="(start server to generate)")
+        self.server_key_entry = ctk.CTkEntry(
+            srv_row2, textvariable=self.server_key_var, width=380,
+            fg_color=COLORS["bg_dark"], border_color=COLORS["border"],
+            text_color=COLORS["text_primary"], state="disabled",
+            font=ctk.CTkFont(family="Consolas, monospace", size=11))
+        self.server_key_entry.pack(side="left", padx=(0, 8))
+
         # --- Progress Bar ---
         progress_frame = ctk.CTkFrame(main_scroll, fg_color="transparent")
         progress_frame.pack(fill="x", pady=(4, 2))
@@ -1357,6 +1411,38 @@ class SfMApp(ctk.CTk):
         self.after(0, lambda: self.btn_run.configure(state="normal", text="⚡  START PROCESSING"))
         self.after(0, lambda: self.btn_cancel.configure(state="disabled"))
         self._processing = False
+
+    def _toggle_server(self):
+        """Start or stop the built-in API server."""
+        if self.server_running:
+            # Stop is not cleanly supported by Flask dev server in a thread,
+            # but the daemon thread will die when the app exits.
+            self.server_running = False
+            self.btn_server_toggle.configure(text="▶  Start Server",
+                                             fg_color=COLORS["accent_blue"])
+            self.server_status_label.configure(text="● Stopped",
+                                               text_color=COLORS["text_muted"])
+            self.server_key_var.set("(start server to generate)")
+            self._log_tagged("[SERVER]", "API server stopped (will shut down with app)")
+        else:
+            try:
+                port = self.server_port.get()
+            except Exception:
+                self._log_tagged("[SERVER]", "❌ Invalid port number")
+                return
+
+            from remap_server import start_server_background
+            self._server_thread, self._server_api_key = start_server_background(
+                host="0.0.0.0", port=port
+            )
+            self.server_running = True
+            self.btn_server_toggle.configure(text="■  Stop Server",
+                                             fg_color=COLORS["error"])
+            self.server_status_label.configure(text=f"● Running on port {port}",
+                                               text_color=COLORS["success"])
+            self.server_key_var.set(self._server_api_key)
+            self._log_tagged("[SERVER]", f"API server started on http://0.0.0.0:{port}")
+            self._log_tagged("[SERVER]", f"API Key: {self._server_api_key}")
 
     def _cancel_process(self):
         """Set the cancellation flag. The processing thread checks it between steps."""
