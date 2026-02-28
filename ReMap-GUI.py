@@ -2084,14 +2084,31 @@ class SfMApp(ctk.CTk):
                         # Move images/ into sparse/0/models/0/0/
                         shutil.move(str(ds_images), str(ds_models))
                         self._log_tagged("[CPU]", f"{ds_tag}   → images/ moved to {ds_models.relative_to(ds_out)}")
-                        # Delete intermediate files from sparse/0/
-                        for _fname in ["cameras.bin", "database.db", "images.bin", "points3D.bin"]:
+                        # Update sparse model so image paths point to new location
+                        try:
+                            _prefix = "models/0/0/images/"
+                            _recon2 = pycolmap.Reconstruction(str(ds_sfm))
+                            _prefixed = 0
+                            for _img2 in _recon2.images.values():
+                                if not _img2.name.startswith(_prefix):
+                                    _img2.name = _prefix + _img2.name
+                                    _prefixed += 1
+                            if _prefixed > 0:
+                                _recon2.write(str(ds_sfm))
+                                self._log_tagged("[CPU]", f"{ds_tag}   → Sparse model updated: "
+                                                 f"{_prefixed} image path(s) prefixed "
+                                                 f"with '{_prefix}'")
+                        except Exception as _exc2:
+                            self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not update sparse "
+                                             f"model image paths: {_exc2}")
+                        # Clean up non-essential intermediate files
+                        for _fname in ["database.db"]:
                             _f = ds_sfm / _fname
                             if _f.exists():
                                 _f.unlink()
                         for _log_f in ds_sfm.glob("colmap.LOG*"):
                             _log_f.unlink()
-                        self._log_tagged("[CPU]", f"{ds_tag}   → Intermediate files removed from sparse/0/")
+                        self._log_tagged("[CPU]", f"{ds_tag}   → Intermediate files cleaned up from sparse/0/")
 
                     self._log_tagged("[OK]", f"{ds_tag} ✓ Dataset {ds_name} complete → {ds_out}")
 
