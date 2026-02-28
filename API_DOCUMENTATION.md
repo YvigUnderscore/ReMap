@@ -37,7 +37,7 @@ The ReMap API server allows the ReScan iOS app (or any authenticated client) to:
 
 ```
 ┌──────────────┐         ┌──────────────────┐         ┌─────────────────┐
-│  📱 ReScan   │  HTTP   │  🖥️ ReMap Server │  output │  📁 COLMAP      │
+│  📱 ReScan   │  HTTP   │ 🖥️ ReMap Server │  output │  📁 COLMAP      │
 │  (iOS App)   │ ──────► │  (REST API)      │ ──────► │  Dataset (ZIP)  │
 │              │         │                  │         │                 │
 │ POST /upload │         │ Process pipeline │         │ images/         │
