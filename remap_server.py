@@ -39,6 +39,8 @@ DEFAULT_HOST = "0.0.0.0"
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "remap_server" / "uploads"
 JOBS_DIR = Path(tempfile.gettempdir()) / "remap_server" / "jobs"
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024 * 1024  # 10 GB
+# Default video FPS assumed for ReScan iPhone captures when ffprobe is unavailable
+_DEFAULT_NATIVE_FPS = 60.0
 
 logger = logging.getLogger("remap_server")
 
@@ -125,14 +127,18 @@ def _run_job(job_id: str):
                 raise RuntimeError("Job cancelled")
 
         # ── Settings with defaults ──
-        fps = float(settings.get("fps", 4.0))
+        try:
+            fps = float(settings.get("fps", 4.0))
+            max_keypoints = int(settings.get("max_keypoints", 4096))
+            num_threads = int(settings.get("num_threads", min(multiprocessing.cpu_count(), 16)))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid numeric setting: {exc}") from exc
+
         feature_type = settings.get("feature_type", "superpoint_aachen")
         matcher_type = settings.get("matcher_type", "superpoint+lightglue")
-        max_keypoints = int(settings.get("max_keypoints", 4096))
         camera_model = settings.get("camera_model", "OPENCV")
         mapper_type = settings.get("mapper_type", "COLMAP")
         stray_approach = settings.get("stray_approach", "full_sfm")
-        num_threads = int(settings.get("num_threads", min(multiprocessing.cpu_count(), 16)))
         pairing_mode = settings.get("pairing_mode", "sequential")
         color_pipeline = settings.get("color_pipeline", "None")
 
@@ -153,10 +159,12 @@ def _run_job(job_id: str):
         _update_job(job_id, progress=10, current_step="ReScan → COLMAP")
         job_logger("Step 1/5 — ReScan → COLMAP conversion")
 
-        # Detect native FPS from the video
+        # Detect native FPS from the video.
+        # Default to 60 FPS (common for iPhone ReScan captures) when ffprobe
+        # is unavailable or the probe fails.
         import subprocess
         video_candidates = list(dataset_dir.glob("rgb.*"))
-        native_fps = 60.0
+        native_fps = _DEFAULT_NATIVE_FPS
         for vc in video_candidates:
             try:
                 probe = subprocess.run(
@@ -169,16 +177,22 @@ def _run_job(job_id: str):
                 native_fps = float(num) / float(den)
                 break
             except Exception:
-                pass
+                job_logger(f"  ⚠ Could not probe video FPS, using default ({_DEFAULT_NATIVE_FPS} FPS)")
         computed_subsample = max(1, round(native_fps / fps))
+
+        try:
+            stray_confidence = int(settings.get("stray_confidence", 2))
+            stray_depth_subsample = int(settings.get("stray_depth_subsample", 2))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid numeric setting: {exc}") from exc
 
         stray_result = convert_stray_to_colmap(
             input_dir=dataset_dir,
             output_dir=output_dir,
             mode=stray_mode,
             subsample=computed_subsample,
-            confidence_threshold=int(settings.get("stray_confidence", 2)),
-            depth_subsample=int(settings.get("stray_depth_subsample", 2)),
+            confidence_threshold=stray_confidence,
+            depth_subsample=stray_depth_subsample,
             skip_pointcloud=not bool(settings.get("stray_gen_pointcloud", True)),
             use_cuda=True,
             image_prefix="",
