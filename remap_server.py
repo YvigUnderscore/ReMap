@@ -624,6 +624,14 @@ def _run_job(job_id: str):
             job_logger("  → images/ moved to sparse/0/models/0/0/")
             # Update sparse model so image paths point to new location
             _prefix_images_in_reconstruction(sfm_dir, "models/0/0/images/", job_logger)
+            # Copy the updated .bin files into models/0/0/ so that directory
+            # contains the fully up-to-date reconstruction (EXR names + prefix),
+            # overwriting any stale SfM output that may have been left there.
+            for bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
+                src_bin = sfm_dir / bin_fname
+                if src_bin.exists():
+                    shutil.copy2(str(src_bin), str(models_final / bin_fname))
+            job_logger("  → Updated sparse .bin files copied to sparse/0/models/0/0/")
             # Clean up non-essential intermediate files and stale text-format
             # sparse model files (only binary .bin files are kept up-to-date by
             # pycolmap; the .txt versions written by stray_to_colmap would still
