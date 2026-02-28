@@ -2101,11 +2101,22 @@ class SfMApp(ctk.CTk):
                         except Exception as _exc2:
                             self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not update sparse "
                                              f"model image paths: {_exc2}")
-                        # Clean up non-essential intermediate files
-                        for _fname in ["database.db"]:
+                        # Clean up non-essential intermediate files and stale
+                        # text-format sparse model files (only binary .bin files
+                        # are kept up-to-date by pycolmap; the .txt versions
+                        # written by stray_to_colmap still reference .png names).
+                        for _fname in ["database.db",
+                                       "cameras.txt", "images.txt", "points3D.txt"]:
                             _f = ds_sfm / _fname
                             if _f.exists():
                                 _f.unlink()
+                        # Remove stale SfM output in models/0/ (GLOMAP copies)
+                        _sfm_model0 = ds_sfm / "models" / "0"
+                        if _sfm_model0.is_dir():
+                            for _stale in ("cameras.bin", "images.bin", "points3D.bin"):
+                                _sf = _sfm_model0 / _stale
+                                if _sf.exists():
+                                    _sf.unlink()
                         for _log_f in ds_sfm.glob("colmap.LOG*"):
                             _log_f.unlink()
                         self._log_tagged("[CPU]", f"{ds_tag}   → Intermediate files cleaned up from sparse/0/")
