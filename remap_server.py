@@ -45,6 +45,24 @@ _DEFAULT_NATIVE_FPS = 60.0
 logger = logging.getLogger("remap_server")
 
 # ---------------------------------------------------------------------------
+#  Colorspace support
+# ---------------------------------------------------------------------------
+
+# Internal pipeline working colorspace (linear light sRGB).
+_INTERNAL_COLORSPACE = "Linear"
+
+# Accepted colorspace identifiers → canonical OIIO colorspace name.
+SUPPORTED_COLORSPACES: dict[str, str] = {
+    "linear":      "Linear",
+    "srgb":        "sRGB",
+    "acescg":      "ACEScg",
+    "aces2065-1":  "ACES2065-1",
+    "rec709":      "Rec. 709",
+    "log":         "Log",
+    "raw":         "Raw",
+}
+
+# ---------------------------------------------------------------------------
 #  Job store  (in-memory, thread-safe)
 # ---------------------------------------------------------------------------
 _jobs: dict = {}
@@ -89,6 +107,38 @@ def _append_log(job_id: str, message: str):
             _jobs[job_id]["log"].append(
                 {"time": datetime.now(timezone.utc).isoformat(), "message": message}
             )
+
+
+def _convert_images_colorspace(images_dir: Path, from_space: str, to_space: str,
+                                logger_fn=None) -> int:
+    """Convert all images in *images_dir* from *from_space* to *to_space*.
+
+    Uses OpenImageIO for the colorspace transformation.
+    Returns the number of images converted.
+    """
+    if from_space == to_space:
+        return 0
+
+    import OpenImageIO as oiio
+
+    extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr"}
+    image_files = [p for p in images_dir.iterdir()
+                   if p.is_file() and p.suffix.lower() in extensions]
+    converted = 0
+    for img_path in image_files:
+        buf = oiio.ImageBuf(str(img_path))
+        if buf.has_error():
+            if logger_fn:
+                logger_fn(f"  ⚠ Could not read {img_path.name}, skipping colorspace conversion")
+            continue
+        result = oiio.ImageBufAlgo.colorconvert(buf, from_space, to_space)
+        if result.has_error():
+            if logger_fn:
+                logger_fn(f"  ⚠ Colorspace conversion failed for {img_path.name}: {result.geterror()}")
+            continue
+        result.write(str(img_path))
+        converted += 1
+    return converted
 
 # ---------------------------------------------------------------------------
 #  Processing thread  (imports heavy libs lazily)
@@ -141,6 +191,8 @@ def _run_job(job_id: str):
         stray_approach = settings.get("stray_approach", "full_sfm")
         pairing_mode = settings.get("pairing_mode", "sequential")
         color_pipeline = settings.get("color_pipeline", "None")
+        input_colorspace = settings.get("input_colorspace")
+        output_colorspace = settings.get("output_colorspace")
 
         # Map approach label
         if "known" in stray_approach.lower() or "arkit" in stray_approach.lower():
@@ -200,6 +252,13 @@ def _run_job(job_id: str):
             cancel_check=cancel_check,
         )
         job_logger(f"  ✓ {stray_result['n_images']} images, {stray_result['n_points']:,} LiDAR points")
+
+        # ── Optional: input colorspace conversion ──
+        if input_colorspace:
+            from_cs = SUPPORTED_COLORSPACES[input_colorspace]
+            job_logger(f"  Colorspace: converting extracted images from '{from_cs}' → '{_INTERNAL_COLORSPACE}'")
+            n = _convert_images_colorspace(images_dir, from_cs, _INTERNAL_COLORSPACE, job_logger)
+            job_logger(f"  ✓ {n} image(s) converted from '{from_cs}' to '{_INTERNAL_COLORSPACE}'")
 
         # ── Step 2: Feature extraction ──
         _update_job(job_id, progress=30, current_step="Features")
@@ -287,6 +346,13 @@ def _run_job(job_id: str):
                 num_threads=num_threads,
             )
         job_logger("  ✓ Reconstruction complete")
+
+        # ── Optional: output colorspace conversion ──
+        if output_colorspace:
+            to_cs = SUPPORTED_COLORSPACES[output_colorspace]
+            job_logger(f"  Colorspace: converting output images from '{_INTERNAL_COLORSPACE}' → '{to_cs}'")
+            n = _convert_images_colorspace(images_dir, _INTERNAL_COLORSPACE, to_cs, job_logger)
+            job_logger(f"  ✓ {n} image(s) converted from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
 
         _update_job(job_id, status="completed", progress=100, current_step="Done")
         _append_log(job_id, "Pipeline finished successfully")
@@ -457,6 +523,22 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
             abort(400, description="Cannot locate ReScan files in uploaded dataset")
 
         settings = data.get("settings", {})
+
+        # Validate optional colorspace fields and merge them into settings.
+        for cs_field in ("input_colorspace", "output_colorspace"):
+            cs_value = data.get(cs_field)
+            if cs_value is not None:
+                if not isinstance(cs_value, str):
+                    abort(400, description=f"'{cs_field}' must be a string")
+                cs_key = cs_value.lower()
+                if cs_key not in SUPPORTED_COLORSPACES:
+                    accepted = ", ".join(sorted(SUPPORTED_COLORSPACES))
+                    abort(400, description=(
+                        f"Unsupported value '{cs_value}' for '{cs_field}'. "
+                        f"Accepted values: {accepted}"
+                    ))
+                settings[cs_field] = cs_key
+
         job = _new_job(actual_dir, settings)
         job_id = job["job_id"]
 
