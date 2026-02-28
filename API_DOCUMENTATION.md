@@ -427,30 +427,30 @@ POST /api/v1/jobs/{job_id}/cancel
 
 All settings are optional. Defaults are used when omitted.
 
-| Setting                  | Type    | Default               | Description                                                |
-|--------------------------|---------|-----------------------|------------------------------------------------------------|
-| `fps`                    | float   | `4.0`                 | Extraction FPS (frames per second from video)              |
-| `feature_type`           | string  | `"superpoint_aachen"` | Feature detector: `superpoint_aachen`, `disk`, `aliked-n16`|
-| `matcher_type`           | string  | `"superpoint+lightglue"` | Matcher: `superpoint+lightglue`, `disk+lightglue`, `superglue` |
-| `max_keypoints`          | int     | `4096`                | Max keypoints per image                                    |
-| `camera_model`           | string  | `"OPENCV"`            | Camera model: `OPENCV`, `PINHOLE`, `SIMPLE_RADIAL`, `OPENCV_FISHEYE` |
-| `mapper_type`            | string  | `"COLMAP"`            | SfM engine: `COLMAP` or `GLOMAP`                          |
-| `stray_approach`         | string  | `"full_sfm"`          | ReScan mode: `full_sfm` or `known_poses` (ARKit)          |
-| `pairing_mode`           | string  | `"sequential"`        | Pairing: `sequential` or `exhaustive`                      |
-| `num_threads`            | int     | *(auto: CPU count)*   | Number of CPU threads                                      |
-| `color_pipeline`         | string  | `"None"`              | Color conversion pipeline                                  |
-| `stray_confidence`       | int     | `2`                   | LiDAR depth confidence threshold (0-2)                     |
-| `stray_depth_subsample`  | int     | `2`                   | Depth frame subsampling factor                             |
-| `stray_gen_pointcloud`   | bool    | `true`                | Generate 3D point cloud from LiDAR depth                   |
+| Setting                  | Type    | Default                  | Description                                                                                                |
+|--------------------------|---------|--------------------------|------------------------------------------------------------------------------------------------------------|
+| `fps`                    | float   | `5.0`                    | Extraction FPS (frames per second from video)                                                              |
+| `feature_type`           | string  | `"superpoint_aachen"`    | Feature detector: `superpoint_aachen`,`superpoint_max`, `disk`, `aliked-n16`,`sift`                        |
+| `matcher_type`           | string  | `"superpoint+lightglue"` | Matcher: `superpoint+lightglue`, `superglue`, `disk+lightglue`,`adalam`                                    |
+| `max_keypoints`          | int     | `8192`                   | Max keypoints per image                                                                                    |
+| `camera_model`           | string  | `"PINHOLE"`              | Camera model: `OPENCV`, `PINHOLE`, `SIMPLE_RADIAL`, `OPENCV_FISHEYE`                                       |
+| `mapper_type`            | string  | `"GLOMAP"`               | SfM engine: `COLMAP` or `GLOMAP`                                                                           |
+| `stray_approach`         | string  | `"full_sfm"`             | ReScan mode: `full_sfm` or `known_poses` (ARKit)                                                           |
+| `pairing_mode`           | string  | `"exhaustive"`           | Pairing: `sequential` or `exhaustive`                                                                      |
+| `num_threads`            | int     | *(auto: CPU count)*      | Number of CPU threads                                                                                      |
+| `color_pipeline`         | string  |`None`                    | If EXR received trough ReScan : input `Utility - Linear - sRGB`, output : `ACES - ACEScg` - Color Pipeline |
+| `stray_confidence`       | int     | `2`                      | LiDAR depth confidence threshold (0-2)                                                                     |
+| `stray_depth_subsample`  | int     | `2`                      | Depth frame subsampling factor                                                                             |
+| `stray_gen_pointcloud`   | bool    | `true`                   | Generate 3D point cloud from LiDAR depth                                                                   |
 
 ### Recommended Settings
 
 | Use Case                 | FPS | Feature            | Matcher               | Approach     |
 |--------------------------|-----|--------------------|-----------------------|--------------|
-| Indoor walkthrough       | 2-4 | `superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
-| Outdoor scene            | 3-5 | `superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
-| Small object / turntable | 5-10| `superpoint_aachen`| `superpoint+lightglue`| `known_poses`|
-| Fast-moving scene        | 5-8 | `disk`             | `disk+lightglue`      | `full_sfm`   |
+| Indoor walkthrough       | 2-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
+| Outdoor scene            | 3-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
+| Small object / turntable | 2-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
+| Fast-moving scene        | 5-20 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
 
 ---
 
