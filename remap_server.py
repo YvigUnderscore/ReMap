@@ -140,7 +140,7 @@ def _prefix_images_in_reconstruction(sfm_dir: Path, prefix: str,
         import pycolmap
         recon = pycolmap.Reconstruction(str(sfm_dir))
         updated = 0
-        for image_id, image in recon.images.items():
+        for image in recon.images.values():
             if not image.name.startswith(prefix):
                 image.name = prefix + image.name
                 updated += 1

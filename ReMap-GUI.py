@@ -2089,7 +2089,7 @@ class SfMApp(ctk.CTk):
                             _prefix = "models/0/0/images/"
                             _recon2 = pycolmap.Reconstruction(str(ds_sfm))
                             _prefixed = 0
-                            for _img_id2, _img2 in _recon2.images.items():
+                            for _img2 in _recon2.images.values():
                                 if not _img2.name.startswith(_prefix):
                                     _img2.name = _prefix + _img2.name
                                     _prefixed += 1
