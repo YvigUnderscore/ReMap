@@ -51,6 +51,9 @@ logger = logging.getLogger("remap_server")
 # Internal pipeline working colorspace (linear light sRGB).
 _INTERNAL_COLORSPACE = "Linear"
 
+# Supported image file extensions for EXR/image-sequence datasets.
+_IMAGE_EXTS = {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
 # Accepted colorspace identifiers → canonical OIIO colorspace name.
 SUPPORTED_COLORSPACES: dict[str, str] = {
     "linear":      "Linear",
@@ -280,7 +283,7 @@ def _run_job(job_id: str):
             # Inline sequential pair generation (same logic as GUI)
             all_imgs = sorted(
                 f.name for f in images_dir.iterdir()
-                if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+                if f.suffix.lower() in _IMAGE_EXTS
             )
             overlap = 20
             pairs = []
@@ -469,16 +472,20 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
         actual_dir = None
         for c in candidates:
             has_video = any(c.glob("rgb.mp4")) or any(c.glob("rgb.mov"))
+            has_image_sequence = (c / "rgb").is_dir() and any(
+                f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+                for f in (c / "rgb").iterdir()
+            )
             has_odometry = (c / "odometry.csv").exists()
             has_camera = (c / "camera_matrix.csv").exists()
-            if has_video and has_odometry and has_camera:
+            if (has_video or has_image_sequence) and has_odometry and has_camera:
                 actual_dir = c
                 break
 
         if actual_dir is None:
             shutil.rmtree(dataset_dir, ignore_errors=True)
             abort(400, description="ZIP does not contain a valid ReScan dataset. "
-                  "Expected: rgb.mp4 (or rgb.mov), odometry.csv, camera_matrix.csv")
+                  "Expected: rgb.mp4 (or rgb.mov) or a rgb/ image directory, odometry.csv, camera_matrix.csv")
 
         return jsonify({
             "dataset_id": dataset_id,
@@ -515,8 +522,12 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
                 candidates.append(child)
         for c in candidates:
             has_video = any(c.glob("rgb.mp4")) or any(c.glob("rgb.mov"))
+            has_image_sequence = (c / "rgb").is_dir() and any(
+                f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+                for f in (c / "rgb").iterdir()
+            )
             has_odometry = (c / "odometry.csv").exists()
-            if has_video and has_odometry:
+            if (has_video or has_image_sequence) and has_odometry:
                 actual_dir = c
                 break
         if actual_dir is None:
