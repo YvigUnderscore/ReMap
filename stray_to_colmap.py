@@ -700,14 +700,37 @@ def convert_stray_to_colmap(
             except ValueError:
                 pass
 
+        has_exr = any(f.suffix.lower() == ".exr" for f in src_files)
+        if has_exr:
+            import OpenImageIO as oiio  # noqa: PLC0415 — deferred to avoid hard dependency at module level
+
         copied = 0
         for frame_idx in selected_frames:
             if frame_idx in src_by_frame:
                 src = src_by_frame[frame_idx]
-                dst_name = f"{image_prefix}{frame_idx:06d}{src.suffix}"
-                dst = images_dir / dst_name
-                if not dst.exists():
-                    shutil.copy2(src, dst)
+                if src.suffix.lower() == ".exr":
+                    dst_name = f"{image_prefix}{frame_idx:06d}.png"
+                    dst = images_dir / dst_name
+                    if not dst.exists():
+                        buf = oiio.ImageBuf(str(src))
+                        if buf.has_error:
+                            logger(f"  ⚠ Could not read {src.name}, skipping")
+                            continue
+                        pixels = buf.get_pixels(oiio.FLOAT)
+                        pixels = np.clip(pixels[..., :3], 0.0, 1.0)
+                        h, w, c = pixels.shape
+                        out_spec = oiio.ImageSpec(w, h, c, oiio.UINT16)
+                        out_buf = oiio.ImageBuf(out_spec)
+                        out_buf.set_pixels(oiio.ROI(), (pixels * 65535).astype(np.uint16))
+                        out_buf.write(str(dst))
+                        if out_buf.has_error:
+                            logger(f"  ⚠ Could not write {dst.name}: {out_buf.geterror()}")
+                            continue
+                else:
+                    dst_name = f"{image_prefix}{frame_idx:06d}{src.suffix}"
+                    dst = images_dir / dst_name
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
                 frame_to_filename[frame_idx] = dst_name
                 copied += 1
 
