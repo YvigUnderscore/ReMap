@@ -384,7 +384,7 @@ def generate_pointcloud_from_depth(
                 # Fallback for formats PIL cannot read (e.g. EXR)
                 import OpenImageIO as oiio
                 buf = oiio.ImageBuf(str(rgb_file))
-                if buf.has_error():
+                if buf.has_error:
                     raise RuntimeError(f"OpenImageIO could not read {rgb_file}: {buf.geterror()}")
                 pixels = buf.get_pixels(oiio.FLOAT)
                 pixels = np.clip(pixels, 0.0, 1.0)
