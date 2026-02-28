@@ -8,16 +8,16 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 
 ## 🔄 The ReMap + ReScan Workflow
 
-```
+```text
 ┌─────────────────────┐         ┌─────────────────────┐         ┌──────────────────────┐
-│      📱 ReScan      │   USB   │      🖥️ ReMap       │  output │   🎯 3DGS Training   │
+│      📱 ReScan      │   API   │      🖥️ ReMap       │  output │   🎯 3DGS Training   │
 │   (iOS Capture)     │ ──────► │  (Desktop Pipeline) │ ──────► │  (Nerfstudio, etc.)  │
-│                     │  copy   │                     │         │                      │
-│ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • images/            │
-│ • RGB video (Log)   │         │ • OCIO color mgmt   │         │ • sparse/0/          │
-│ • ARKit odometry    │         │ • HLoc features     │         │   cameras.bin        │
-│ • Camera intrinsics │         │ • COLMAP / GLOMAP   │         │   images.bin         │
-│                     │         │                     │         │   points3D.bin       │
+│                     │         │                     │         │                      │
+│ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • models/0/0/        │
+│ • RGB video (Log)   │         │ • OCIO color mgmt   │         │   cameras.bin        │
+│ • ARKit odometry    │         │ • HLoc features     │         │   images.bin         │
+│ • Camera intrinsics │         │ • COLMAP / GLOMAP   │         │   points3D.bin       │
+│                     │         │                     │         │   images/            │
 └─────────────────────┘         └─────────────────────┘         └──────────────────────┘
 ```
 
@@ -25,240 +25,133 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 
 ---
 
-## ✨ Features
+## 🌐 Wireless Capture API
 
-- **3 Input Modes**: Video files (`.mp4`, `.mov`), Image folders, or [ReScan](https://github.com/YvigUnderscore/ReScan) LiDAR datasets
-- **REST API Server**: Built-in API server for remote dataset upload and processing from the [ReScan](https://github.com/YvigUnderscore/ReScan) iOS app — start from the GUI or run standalone (see [API Documentation](API_DOCUMENTATION.md))
-- **GPU-Accelerated Extraction**: FFmpeg with CUDA hardware decoding when available
-- **16-bit Smart Mode**: Automatically enables 16-bit PNG output when converting to linear colorspaces (ACEScg, scene-linear). Can also be forced manually
-- **OCIO Color Management**: Full OpenColorIO pipeline — convert from camera Log to any working space before SfM
-- **State-of-the-Art SfM**: SuperPoint, DISK, ALIKED features with LightGlue / SuperGlue matching via [HLoc](https://github.com/cvg/Hierarchical-Localization)
-- **Dual SfM Engines**: Choose between COLMAP (robust, CPU) or [GLOMAP](https://github.com/colmap/glomap) (fast, GPU)
-- **LiDAR-Guided Reconstruction**: When using ReScan data, known ARKit poses can be used for triangulation (Approach A) or full SfM (Approach B)
-- **In-App Guidance**: ⓘ tooltips on every section explain settings and provide recommended configurations
-- **Auto-Skip**: If images already exist in the output directory, extraction is skipped automatically
-- **Modern Dark UI**: Built with [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)
+The most powerful way to use ReMap is by connecting it directly to **ReScan** over your local network using the built-in REST API.
+
+1. Start the API Server from the **ReMap GUI**.
+2. An **API Key** is instantly generated.
+3. Open **ReScan** on iOS, enter your computer's IP and API Key.
+4. **Capture and send** datasets directly from your phone — ReMap will automatically unpack, process, and spit out the fully solved 3D model!
+
+> 📖 **Developers:** See the comprehensive [API Documentation](API_DOCUMENTATION.md) to integrate ReMap with your own HTTP clients, complete with Swift `URLSession` examples.
 
 ---
 
-## 📁 Output Format
+## ✨ Features
 
-ReMap produces a standard **COLMAP** dataset structure:
+- **🌐 Live API Server**: Remote dataset upload and automated processing from the [ReScan](https://github.com/YvigUnderscore/ReScan) iOS app.
+- **🎨 Advanced EXR & Color Pipeline**: Deep OpenColorIO processing. Convert from camera Log to ACEScg before SfM. Automatically exports 16-bit half-float or 32-bit float **EXR** datasets for professional workflows.
+- **📸 3 Input Modes**: Video files (`.mp4`, `.mov`), Image folders, or ReScan LiDAR datasets.
+- **⚡ GPU-Accelerated Extraction & SfM**: FFmpeg with CUDA hardware decoding, and dual SfM engines (choose robust CPU COLMAP or fast GPU [GLOMAP](https://github.com/colmap/glomap)).
+- **📍 LiDAR-Guided Reconstruction**: When using ReScan data, ARKit poses can triangulate the model instantly or guide the full SfM solver.
+- **🧠 State-of-the-Art Matching**: SuperPoint, DISK, ALIKED features with LightGlue / SuperGlue matching via [HLoc](https://github.com/cvg/Hierarchical-Localization).
+- **🛡️ Secure & Optimized**: Multi-threaded file processing skips existing outputs. Secure installation scripts with pinned submodules ensure a reproducible environment preventing missing dependencies. Windows file-lock handling for ultimate stability. Modern CustomTkinter dark UI.
 
-```
+---
+
+## 📂 Output Format (Drag-and-Drop)
+
+ReMap produces a standard **COLMAP** dataset structure, specifically optimized to be bundled into a **single, self-contained directory** for modern training engines:
+
+```text
 output_directory/
-├── images/               # Extracted / copied images (PNG)
-│   ├── vid01_0001.png
-│   ├── vid01_0002.png
-│   └── ...
-├── hloc_outputs/         # Intermediate HLoc files
-│   ├── features.h5
-│   ├── pairs.txt
-│   └── matches.h5
+├── hloc_outputs/             # Intermediate feature files
 └── sparse/
-    └── 0/                # Reconstructed COLMAP model
-        ├── cameras.bin
-        ├── images.bin
-        └── points3D.bin
+    └── 0/
+        └── models/
+            └── 0/
+                └── 0/        # 🎯 Drag-and-drop this folder to your trainer!
+                    ├── cameras.bin
+                    ├── images.bin      # Image paths are automatically re-linked!
+                    ├── points3D.bin
+                    └── images/         # Bundled PNG or EXR frames
+                        ├── 000001.exr
+                        └── ...
 ```
 
-This output is directly compatible with:
-- [Brush](https://github.com/ArthurBrussee/brush) (Recommended) — *Huge thanks to the author!*
-- [Nerfstudio](https://docs.nerf.studio/)
-- [gsplat](https://github.com/nerfstudio-project/gsplat)
-- Any COLMAP-based training pipeline
+> 💡 **Ready for 3DGS**: Because the `images/` directory is bundled inside the sparse model alongside tweaked `.bin` files, you can immediately drag the `0/0/` folder into tools like **Brush**, **Nerfstudio**, or **gsplat**.
 
 ---
 
 ## 🚀 Installation
 
-ReMap supports both **Windows** and **Linux** operating systems. We provide scripts to make this as close to a "one-click install" as possible.
+ReMap supports both **Windows** and **Linux**. We provide secure scripts to make this a "one-click install."
 
-### Prerequisites & Dependencies
-
-To run ReMap, your system needs a few core components. Our automated scripts handle downloading and configuring most of these, but here's a breakdown of what happens under the hood:
+### Prerequisites
 
 | Requirement | Details |
 |---|---|
 | **OS** | Windows 10/11 or Linux (Ubuntu 22.04+ recommended) |
-| **GPU** | NVIDIA GPU with CUDA (strongly recommended for HLoc and GLOMAP) |
-| **Python** | 3.10 or 3.12 (A Virtual Environment is **critical**, see below) |
-| **FFmpeg** | Required for parsing videos and extracting frames |
-| **COLMAP** | The core Structure-from-Motion engine |
-| **GLOMAP** | (Optional) A faster, GPU-accelerated alternative to COLMAP |
+| **GPU** | NVIDIA GPU with CUDA (strongly recommended) |
+| **Python** | 3.10 or 3.12 (A Virtual Environment is automatically created) |
 
-> ⚠️ **The Importance of Virtual Environments (Venv)**
-> Due to the complex nature of photogrammetry and Deep Learning dependencies (like PyTorch with specific CUDA versions, HLoc, pycolmap, etc.), it is perfectly normal and **highly recommended** to use an isolated Python Virtual Environment (`.venv`). This keeps ReMap's dependencies strictly separate from your underlying system or other projects, preventing version conflicts, missing packages, and keeping your OS clean. Our installation scripts handle this automatically.
+### The "One-Click" Automated Install (Recommended)
 
-### Method 1: The "One-Click" Automated Install (Recommended)
-
-The `install_all.sh` (Linux) and `install_all.bat` (Windows) scripts handle everything for you: system dependencies, downloading COLMAP/GLOMAP, setting up the Python venv, and installing pip packages. It's essentially a one-click process that sets up the ideal isolated environment.
+Our installer handles system dependencies, pinned submodule clones (COLMAP/GLOMAP), Python venvs, and pip packages securely.
 
 **For Linux (Ubuntu):**
 ```bash
-# 1. Clone the repository
 git clone https://github.com/YvigUnderscore/ReMap.git
 cd ReMap
-
-# 2. Run the installer (requires sudo for system packages)
 sudo ./install_all.sh
-
-# 3. Launch ReMap
 ./launch.sh
 ```
 
 **For Windows:**
 ```bat
-# 1. Clone the repository (or download as ZIP and extract)
 git clone https://github.com/YvigUnderscore/ReMap.git
 cd ReMap
-
-# 2. Double-click the installer script
 install_all.bat
-
-# 3. Launch ReMap
 launch.bat
 ```
 
-> **Details on the automated install:** The script performs these steps sequentially:
-> 1. **System packages** — Grabs build tools, CMake, Boost, COLMAP dependencies, FFmpeg.
-> 2. **COLMAP** — Installs via system packages (Linux) or downloads pre-built binaries (Windows).
-> 3. **GLOMAP** — Clones and builds from source (Linux) or downloads binaries (Windows).
-> 4. **Python venv** — Creates the isolated `.venv` environment to protect your system.
-> 5. **Python deps** — Installs PyTorch (CUDA), HLoc, pycolmap, CustomTkinter, and all requirements inside the environment.
+*(For a step-by-step manual setup, refer to older commit histories or open the installer scripts to see the exact system packages required).*
 
-### Method 2: Manual Install (Linux Example)
+---
 
-If you prefer to install components individually or need a custom setup:
+## 🎨 Advanced Color Management (OCIO & EXR)
 
-#### Step 1 — System Dependencies
+ReMap uses **OpenImageIO** to process OpenColorIO workflows, essential for flat/log footage.
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build git ffmpeg \
-    libboost-all-dev libceres-dev libfreeimage-dev libglew-dev \
-    qtbase5-dev libflann-dev libeigen3-dev libmetis-dev libsqlite3-dev \
-    python3-pip python3-venv colmap
-```
-
-#### Step 2 — Python Environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-#### Step 3 — GLOMAP (Optional)
-
-```bash
-git clone --recursive https://github.com/colmap/glomap.git
-cd glomap
-cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release
-ninja -C build
-sudo ninja -C build install
-cd ..
-```
-
-#### Step 4 — Launch
-
-```bash
-source .venv/bin/activate
-python3 ReMap-GUI.py
-```
-
-### OCIO Support
-
-ReMap uses **OpenImageIO** (installed automatically via `requirements.txt`) to process OpenColorIO workflows. If you provide a valid standalone `.ocio` file (e.g., from ACES), ReMap will convert input images from Log/Raw colorspaces into a linear working space before extracting features. This improves matching robustness on flat/log footage.
-
-You can set the `OCIO` environment variable to your config file, or browse for it directly in the app:
-
-```bash
-export OCIO=/path/to/your/config.ocio
-```
+1. Set your `OCIO` environment variable, or browse for it directly in the app.
+2. If converting to linear spaces (like **ACEScg**), ReMap enables its **EXR Pipeline**. 
+3. Outputs are heavily optimized:
+    - **16-bit PNG** (For integer-based linear workflows)
+    - **16-bit half-float EXR** (Default for ACES/scene-linear — highly efficient)
+    - **32-bit float EXR** (Can be forced manually for maximum precision)
 
 ---
 
 ## ⚙️ Usage Guide
 
-### Video Mode
-
-1. Select **Video (.mp4, .mov)** as input mode
-2. Click **Browse** to select one or more video files
-3. Set the **extraction FPS** (2–5 FPS recommended for photogrammetry, higher for fast-moving scenes)
-4. Choose your output folder
-5. Configure the SfM pipeline (defaults work well for most cases)
-6. Click **⚡ START PROCESSING**
-
-### Image Folder Mode
-
-1. Select **Image Folder** as input mode
-2. Browse to the folder containing your images (JPG, PNG, TIFF)
-3. Images will be copied to the output directory and processed
+### Video & Image Folder Modes
+1. Select **Video** or **Image Folder** mode.
+2. Set extraction FPS (2–5 FPS recommended for video).
+3. Configure the SfM pipeline (defaults work well).
+4. Click **⚡ START PROCESSING**.
 
 ### ReScan (LiDAR) Mode
-
-> Requires a dataset captured with [ReScan](https://github.com/YvigUnderscore/ReScan) on iPhone.
-
-1. Select **Rescan (LiDAR)** as input mode
-2. Browse to the ReScan dataset folder(s) containing `rgb.mp4` or `rgb.mov` (Apple ProRes Log), `odometry.csv`, and `camera_matrix.csv`
-3. Choose your reconstruction approach:
-   - **Full SfM (Approach B)** — Runs complete SfM pipeline. Most robust
-   - **ARKit Poses (Approach A)** — Uses known LiDAR poses for triangulation. Faster
-4. Adjust **Extraction FPS** to control the number of frames extracted (the app will perfectly sync Apple Log video and ARKit Odometry based on this FPS)
+1. Select **Rescan (LiDAR)** mode.
+2. Browse to the dataset containing `rgb.mp4` (Apple ProRes Log), `odometry.csv`, and `camera_matrix.csv`.
+3. Choose processing approach:
+   - **Full SfM (Approach B)** — Runs complete SfM. Most robust.
+   - **ARKit Poses (Approach A)** — Uses known poses for fast triangulation.
+4. Set extraction FPS to perfectly sync Log video and ARKit odometry.
 
 ### Recommended Settings
 
 | Setting | Video (Standard) | Video (Apple Log) | ReScan (LiDAR) |
 |---|---|---|---|
-| Extraction FPS | 2–5 FPS | 2–5 FPS | 2–5 FPS |
-| Features | SuperPoint | SuperPoint | SuperPoint |
-| Matcher | LightGlue | LightGlue | LightGlue |
-| Pairing | Sequential | Sequential | Sequential |
-| SfM Engine | COLMAP | COLMAP | COLMAP |
-| 16-bit | Off | Auto (via OCIO) | Off |
+| Features / Matcher | SuperPoint / LightGlue | SuperPoint / LightGlue | SuperPoint / LightGlue |
+| SfM Engine | COLMAP / GLOMAP | COLMAP / GLOMAP | COLMAP |
 | OCIO | Off | On (Log → ACEScg) | Off |
-
-### API Server Mode
-
-ReMap includes a built-in REST API server so the ReScan iOS app can send datasets directly over the network.
-
-**From the GUI:**
-1. Scroll to **🌐 API Server (ReScan Remote)**
-2. Click **▶ Start Server** — an API key is generated automatically
-3. Use the displayed API key in ReScan to connect
-
-**Standalone server:**
-```bash
-source .venv/bin/activate
-python remap_server.py --port 5000
-```
-
-> 📖 See [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for the full endpoint reference and iOS/Swift integration guide.
+| Image Output | PNG (8-bit) | EXR (16-bit Half) | PNG (8-bit) |
 
 ---
 
-## 📄 License
+## 📄 License & 🤝 Acknowledgements
 
-1. **Output Data (Your Reconstructions)**: You own 100% of the data you produce (images, point clouds, COLMAP models, etc.). You are free to use, modify, distribute, and commercialize any output without restrictions.
+**License:** Output data (reconstructions) are 100% yours to commercialize. The source code is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (Non-Commercial). 
 
-2. **The Software (Source Code)**: The ReMap source code is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/) License.
-
-    - **Share** — Copy and redistribute in any medium or format
-    - **Adapt** — Remix, transform, and build upon the code
-    - **NonCommercial** — You may not use the source code for commercial purposes
-    - **Commercial Usage** — Requires prior written consent from the author
-
-See the [LICENSE](LICENSE) file for the full legal text.
-
----
-
-## 🙏 Acknowledgements
-
-- [HLoc](https://github.com/cvg/Hierarchical-Localization) — Hierarchical Localization
-- [COLMAP](https://colmap.github.io/) — Structure from Motion
-- [GLOMAP](https://github.com/colmap/glomap) — Global Mapper
-- [SuperPoint + LightGlue](https://github.com/cvg/LightGlue) — Feature detection & matching
-- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) — Modern Tkinter UI
-- [ReScan](https://github.com/YvigUnderscore/ReScan) — iOS LiDAR capture companion app
+**Thanks to:** [HLoc](https://github.com/cvg/Hierarchical-Localization) | [COLMAP](https://colmap.github.io/) | [GLOMAP](https://github.com/colmap/glomap) | [SuperPoint & LightGlue](https://github.com/cvg/LightGlue) | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) | [ReScan](https://github.com/YvigUnderscore/ReScan)
