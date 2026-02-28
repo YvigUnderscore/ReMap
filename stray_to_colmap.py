@@ -276,6 +276,9 @@ def generate_pointcloud_from_depth(
     intrinsics: dict,
     images_dir: Path,
     selected_frames: list[int],
+    frame_to_filename: dict[int, str],
+    img_w: int,
+    img_h: int,
     confidence_threshold: int = 2,
     depth_subsample: int = 2,
     logger=print
@@ -296,10 +299,8 @@ def generate_pointcloud_from_depth(
     sample_depth = Image.open(sorted(depth_dir.glob("*.png"))[0])
     dw, dh = sample_depth.size  # 256×192
 
-    # Compute depth intrinsics from RGB intrinsics by resolution ratio
-    sample_rgb = Image.open(sorted(images_dir.glob("*.png"))[0])
-    rw, rh = sample_rgb.size  # 1920×1440
-
+    # Use the passed RGB resolution instead of guessing from a sample image
+    rw, rh = img_w, img_h
     scale_x = dw / rw
     scale_y = dh / rh
     fx_d = intrinsics["fx"] * scale_x
@@ -371,10 +372,10 @@ def generate_pointcloud_from_depth(
         pts_world = (R_cw @ pts_cam.T).T + t_world
 
         # Get colors from RGB frame
-        rgb_file = images_dir / f"{frame_idx:06d}.png"
-        if not rgb_file.exists():
-            # Try to find the corresponding extracted frame
-            # Frames may be numbered differently after subsampling
+        rgb_filename = frame_to_filename.get(frame_idx)
+        rgb_file = images_dir / rgb_filename if rgb_filename else None
+        if rgb_file is None or not rgb_file.exists():
+            # Fallback if RGB frame is missing
             colors = np.full((pts_world.shape[0], 3), 128, dtype=np.uint8)
         else:
             rgb_img = np.array(Image.open(rgb_file))
@@ -736,6 +737,9 @@ def convert_stray_to_colmap(
             intrinsics=intrinsics,
             images_dir=images_dir,
             selected_frames=selected_frames,
+            frame_to_filename=frame_to_filename,
+            img_w=img_w,
+            img_h=img_h,
             confidence_threshold=confidence_threshold,
             depth_subsample=depth_subsample,
             logger=logger,
