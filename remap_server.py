@@ -555,11 +555,22 @@ def _run_job(job_id: str):
             job_logger("  → images/ moved to sparse/0/models/0/0/")
             # Update sparse model so image paths point to new location
             _prefix_images_in_reconstruction(sfm_dir, "models/0/0/images/", job_logger)
-            # Clean up non-essential intermediate files
-            for fname in ["database.db"]:
+            # Clean up non-essential intermediate files and stale text-format
+            # sparse model files (only binary .bin files are kept up-to-date by
+            # pycolmap; the .txt versions written by stray_to_colmap would still
+            # reference the old .png names).
+            for fname in ["database.db",
+                          "cameras.txt", "images.txt", "points3D.txt"]:
                 f = sfm_dir / fname
                 if f.exists():
                     f.unlink()
+            # Remove stale SfM output left in models/0/ (GLOMAP copies, not moves)
+            sfm_model0 = sfm_dir / "models" / "0"
+            if sfm_model0.is_dir():
+                for stale in ("cameras.bin", "images.bin", "points3D.bin"):
+                    sf = sfm_model0 / stale
+                    if sf.exists():
+                        sf.unlink()
             for log_f in sfm_dir.glob("colmap.LOG*"):
                 log_f.unlink()
             job_logger("  → Intermediate files cleaned up from sparse/0/")
