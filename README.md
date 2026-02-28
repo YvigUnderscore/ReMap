@@ -27,11 +27,11 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 
 ## 🌐 Wireless Capture API
 
-The most powerful way to use ReMap is by connecting it directly to **ReScan** over your local network using the built-in REST API.
+The most powerful way to use ReMap is by connecting it directly to **ReScan** over your local network using the built-in REST API (You can also port-forward to open-it remotely).
 
-1. Start the API Server from the **ReMap GUI**.
-2. An **API Key** is instantly generated.
-3. Open **ReScan** on iOS, enter your computer's IP and API Key.
+1. Start the API Server from the **ReMap GUI** or the headless server mode.
+2. An **API Key** is instantly generated, you can also customize it (before starting the server).
+3. Open **ReScan** on iOS, enter your computer/server IP and API Key.
 4. **Capture and send** datasets directly from your phone — ReMap will automatically unpack, process, and spit out the fully solved 3D model!
 
 > 📖 **Developers:** See the comprehensive [API Documentation](API_DOCUMENTATION.md) to integrate ReMap with your own HTTP clients, complete with Swift `URLSession` examples.
