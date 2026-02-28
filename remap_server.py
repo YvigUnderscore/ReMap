@@ -223,8 +223,60 @@ def _prefix_images_in_reconstruction(sfm_dir: Path, prefix: str,
             logger_fn(f"  ⚠ Could not update sparse model image paths: {exc}")
 
 
+def _process_exr_worker(img_path_str: str, to_cs: str, internal_cs: str):
+    """
+    Top-level worker for parallel EXR color conversion via ProcessPoolExecutor.
+    """
+    import OpenImageIO as oiio
+    try:
+        oiio.attribute("opencl:enable", 1)
+        oiio.attribute("use_opengl", 1)
+    except Exception:
+        pass
+        
+    img_path = Path(img_path_str)
+    if not img_path.exists():
+        return False, None
+    try:
+        buf = oiio.ImageBuf(str(img_path))
+        if buf.has_error:
+            return False, f"Could not read {img_path.name} for colorspace conversion"
+        result = oiio.ImageBufAlgo.colorconvert(buf, internal_cs, to_cs)
+        if result.has_error:
+            return False, f"Colorspace conversion failed for {img_path.name}: {result.geterror()}"
+        result.write(str(img_path))
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _convert_image_worker(img_path_str: str, from_space: str, to_space: str):
+    """
+    Top-level worker for parallel image color conversion via ProcessPoolExecutor.
+    """
+    import OpenImageIO as oiio
+    try:
+        oiio.attribute("opencl:enable", 1)
+        oiio.attribute("use_opengl", 1)
+    except Exception:
+        pass
+
+    img_path = Path(img_path_str)
+    try:
+        buf = oiio.ImageBuf(str(img_path))
+        if buf.has_error:
+            return False, f"Could not read {img_path.name}, skipping colorspace conversion"
+        result = oiio.ImageBufAlgo.colorconvert(buf, from_space, to_space)
+        if result.has_error:
+            return False, f"Colorspace conversion failed for {img_path.name}: {result.geterror()}"
+        result.write(str(img_path))
+        return True, None
+    except Exception as e:
+        return False, f"Exception converting {img_path.name}: {e}"
+
+
 def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
-                       output_colorspace: str | None, logger_fn=None) -> None:
+                       output_colorspace: str | None, logger_fn=None, num_threads: int = 4) -> None:
     """Post-processing: replace intermediate PNGs with colorspace-converted EXR files.
 
     When the source dataset contained EXR images (``rgb/`` directory), SfM was
@@ -269,28 +321,28 @@ def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
 
     # 2. Apply output colorspace conversion to EXR files
     if output_colorspace:
-        import OpenImageIO as oiio
         to_cs = SUPPORTED_COLORSPACES[output_colorspace]
         if to_cs != _INTERNAL_COLORSPACE:
+            import concurrent.futures
             converted = 0
-            for frame_idx, png_name in frame_to_filename.items():
-                exr_dst_name = png_name.removesuffix(".png") + ".exr"
-                exr_dst = images_dir / exr_dst_name
-                if not exr_dst.exists():
-                    continue
-                buf = oiio.ImageBuf(str(exr_dst))
-                if buf.has_error:
-                    if logger_fn:
-                        logger_fn(f"  ⚠ Could not read {exr_dst.name} for colorspace conversion")
-                    continue
-                result = oiio.ImageBufAlgo.colorconvert(buf, _INTERNAL_COLORSPACE, to_cs)
-                if result.has_error:
-                    if logger_fn:
-                        logger_fn(f"  ⚠ Colorspace conversion failed for {exr_dst.name}: "
-                                  f"{result.geterror()}")
-                    continue
-                result.write(str(exr_dst))
-                converted += 1
+
+            if logger_fn:
+                logger_fn(f"  → Multithreading: converting {len(frame_to_filename)} EXR files with {num_threads} processes...")
+
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+                fs = []
+                for frame_idx, png_name in frame_to_filename.items():
+                    exr_dst_name = png_name.removesuffix(".png") + ".exr"
+                    exr_dst = images_dir / exr_dst_name
+                    fs.append(executor.submit(_process_exr_worker, str(exr_dst), to_cs, _INTERNAL_COLORSPACE))
+                
+                for future in concurrent.futures.as_completed(fs):
+                    res, err = future.result()
+                    if res:
+                        converted += 1
+                    elif err and logger_fn:
+                        logger_fn(f"  ⚠ {err}")
+
             if logger_fn:
                 logger_fn(f"  → {converted} EXR file(s) converted "
                           f"from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
@@ -311,7 +363,7 @@ def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
 
 
 def _convert_images_colorspace(images_dir: Path, from_space: str, to_space: str,
-                                logger_fn=None) -> int:
+                                logger_fn=None, num_threads: int = 4) -> int:
     """Convert all images in *images_dir* from *from_space* to *to_space*.
 
     Uses OpenImageIO for the colorspace transformation.
@@ -321,24 +373,38 @@ def _convert_images_colorspace(images_dir: Path, from_space: str, to_space: str,
         return 0
 
     import OpenImageIO as oiio
+    try:
+        oiio.attribute("opencl:enable", 1)
+        oiio.attribute("use_opengl", 1)
+    except Exception:
+        pass
+
+    import concurrent.futures
 
     extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr"}
     image_files = [p for p in images_dir.iterdir()
                    if p.is_file() and p.suffix.lower() in extensions]
+                   
+    if not image_files:
+        return 0
+
+    import concurrent.futures
+
+    if logger_fn:
+        logger_fn(f"  → Multithreading: converting {len(image_files)} images with {num_threads} processes...")
+
     converted = 0
-    for img_path in image_files:
-        buf = oiio.ImageBuf(str(img_path))
-        if buf.has_error:
-            if logger_fn:
-                logger_fn(f"  ⚠ Could not read {img_path.name}, skipping colorspace conversion")
-            continue
-        result = oiio.ImageBufAlgo.colorconvert(buf, from_space, to_space)
-        if result.has_error:
-            if logger_fn:
-                logger_fn(f"  ⚠ Colorspace conversion failed for {img_path.name}: {result.geterror()}")
-            continue
-        result.write(str(img_path))
-        converted += 1
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+        fs = {executor.submit(_convert_image_worker, str(p), from_space, to_space): p for p in image_files}
+        for future in concurrent.futures.as_completed(fs):
+            success, err = future.result()
+            if success:
+                converted += 1
+            else:
+                if logger_fn:
+                    logger_fn(f"  ⚠ {err}")
+
     return converted
 
 # ---------------------------------------------------------------------------
@@ -510,7 +576,7 @@ def _run_job(job_id: str):
         if input_colorspace:
             from_cs = SUPPORTED_COLORSPACES[input_colorspace]
             job_logger(f"  Colorspace: converting extracted images from '{from_cs}' → '{_INTERNAL_COLORSPACE}'")
-            n = _convert_images_colorspace(images_dir, from_cs, _INTERNAL_COLORSPACE, job_logger)
+            n = _convert_images_colorspace(images_dir, from_cs, _INTERNAL_COLORSPACE, job_logger, num_threads=num_threads)
             job_logger(f"  ✓ {n} image(s) converted from '{from_cs}' to '{_INTERNAL_COLORSPACE}'")
 
         # ── Step 2: Feature extraction ──
@@ -604,7 +670,7 @@ def _run_job(job_id: str):
         if output_colorspace:
             to_cs = SUPPORTED_COLORSPACES[output_colorspace]
             job_logger(f"  Colorspace: converting output images from '{_INTERNAL_COLORSPACE}' → '{to_cs}'")
-            n = _convert_images_colorspace(images_dir, _INTERNAL_COLORSPACE, to_cs, job_logger)
+            n = _convert_images_colorspace(images_dir, _INTERNAL_COLORSPACE, to_cs, job_logger, num_threads=num_threads)
             job_logger(f"  ✓ {n} image(s) converted from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
 
         # ── Optional: EXR remapping (when source was EXR image sequence) ──
@@ -614,6 +680,7 @@ def _run_job(job_id: str):
             images_dir=images_dir,
             output_colorspace=output_colorspace,
             logger_fn=job_logger,
+            num_threads=num_threads,
         )
 
         # ── Post-EXR: move images/ to sparse/0/models/0/0/ and update sparse ──

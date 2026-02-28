@@ -130,6 +130,112 @@ def generate_sequential_pairs(image_dir, pairs_path, overlap=10):
         f.writelines(' '.join(p) + '\n' for p in pairs)
 
 
+def _process_image_color_worker(img_path_str, pipeline, cs_in, cs_out, colorconfig_path, exr_out_dir_str):
+    """
+    Top-level worker function for parallel color conversion via ProcessPoolExecutor.
+    Receives only picklable arguments.
+    Returns: (success_bool, error_msg_or_none)
+    """
+    img_path = Path(img_path_str)
+    try:
+        if HAS_OCIO:
+            oiio.attribute("opencl:enable", 1)
+            oiio.attribute("use_opengl", 1)
+    except Exception:
+        pass
+
+    if pipeline == "OCIO" and HAS_OCIO:
+        try:
+            colorconfig = oiio.ColorConfig(colorconfig_path) if colorconfig_path else None
+            buf = oiio.ImageBuf(str(img_path))
+            if not buf.has_error:
+                res = oiio.ImageBufAlgo.colorconvert(buf, buf, cs_in, cs_out, colorconfig=colorconfig)
+                if res:
+                    buf.write(str(img_path))
+                    return True, None
+        except Exception as e:
+            return False, str(e)
+        return False, "OCIO Error"
+
+    elif pipeline == "Apple Log -> sRGB (ACES Tone Mapped)":
+        try:
+            import cv2, numpy as np
+            img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                return False, "Failed to read image"
+            max_val = 65535.0 if img.dtype == np.uint16 else 255.0
+            if len(img.shape) == 3 and img.shape[2] >= 3:
+                try:
+                    gpu_img = cv2.cuda_GpuMat()
+                    gpu_img.upload(img)
+                    gpu_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB)
+                    img_rgb = gpu_rgb.download().astype(np.float32) / max_val
+                except Exception:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
+            else:
+                return False, "Unsupported channels"
+
+            h, w, ch = img_rgb.shape
+            buf = oiio.ImageBuf(oiio.ImageSpec(w, h, ch, oiio.FLOAT))
+            buf.set_pixels(oiio.ROI(), img_rgb)
+
+            oiio.ImageBufAlgo.colorconvert(buf, buf, 'Utility - Rec.2020 - Camera', 'Output - sRGB')
+
+            spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
+            buf16 = oiio.ImageBuf(spec16)
+            oiio.ImageBufAlgo.resize(buf16, buf)
+            buf16.write(str(img_path))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    elif pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
+        try:
+            import cv2, numpy as np
+            img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                return False, "Failed to read image"
+            max_val = 65535.0 if img.dtype == np.uint16 else 255.0
+            if len(img.shape) == 3 and img.shape[2] >= 3:
+                try:
+                    gpu_img = cv2.cuda_GpuMat()
+                    gpu_img.upload(img)
+                    gpu_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB)
+                    img_rgb = gpu_rgb.download().astype(np.float32) / max_val
+                except Exception:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
+            else:
+                return False, "Unsupported channels"
+
+            h, w, ch = img_rgb.shape
+            spec = oiio.ImageSpec(w, h, ch, oiio.FLOAT)
+
+            buf_aces = oiio.ImageBuf(spec)
+            buf_aces.set_pixels(oiio.ROI(), img_rgb)
+            oiio.ImageBufAlgo.colorconvert(buf_aces, buf_aces, 'Utility - Rec.2020 - Camera', 'ACES - ACEScg')
+
+            if exr_out_dir_str:
+                os.makedirs(exr_out_dir_str, exist_ok=True)
+                out_path_exr = str(Path(exr_out_dir_str) / f"{img_path.stem}.exr")
+            else:
+                out_path_exr = str(img_path).rsplit('.', 1)[0] + '.exr'
+            buf_aces.write(out_path_exr)
+
+            buf_srgb = oiio.ImageBuf(spec)
+            buf_srgb.set_pixels(oiio.ROI(), img_rgb)
+            oiio.ImageBufAlgo.colorconvert(buf_srgb, buf_srgb, 'Utility - Rec.2020 - Camera', 'Output - sRGB')
+
+            spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
+            buf16 = oiio.ImageBuf(spec16)
+            oiio.ImageBufAlgo.resize(buf16, buf_srgb)
+            buf16.write(str(img_path))
+
+            return True, None
+        except Exception as e:
+            return False, str(e)
+            
+    return False, "Unknown pipeline"
+
 def _detect_16bit_from_images(image_dir):
     """Check if existing images in a directory are 16-bit."""
     for ext in ('*.png', '*.tif', '*.tiff'):
@@ -1644,6 +1750,13 @@ class SfMApp(ctk.CTk):
             
             self._check_cancelled()
             self._log_tagged(tag_prefix, step_description)
+
+            if HAS_OCIO:
+                try:
+                    oiio.attribute("opencl:enable", 1)
+                    oiio.attribute("use_opengl", 1)
+                except Exception:
+                    pass
             
             if _current_pipeline == "OCIO":
                 cfg_path = self.ocio_path.get()
@@ -1652,13 +1765,7 @@ class SfMApp(ctk.CTk):
                 if not cs_in or not cs_out:
                     self._log(f"❌ OCIO ERROR: Colorspaces not defined.")
                     raise ValueError("OCIO colorspaces missing")
-                if HAS_OCIO:
-                    try:
-                        colorconfig = oiio.ColorConfig(cfg_path)
-                    except Exception as e:
-                        self._log(f"❌ OCIO Config ERROR: {e}")
-                        raise
-                else:
+                if not HAS_OCIO:
                     raise ValueError("OCIO pipeline selected but OpenImageIO missing.")
             elif _current_pipeline == "Apple Log -> sRGB (ACES Tone Mapped)":
                 self._log_tagged(tag_prefix, "       ↳ Native Apple ProRes Log to sRGB via ACES Filmic Tone Mapping (16-bit)")
@@ -1677,105 +1784,35 @@ class SfMApp(ctk.CTk):
 
             total_color = len(all_images)
             
-            def process_image_color(img_path):
-                if self._cancelled:
-                    return False, "Cancelled"
-                if _current_pipeline == "OCIO" and HAS_OCIO:
-                    try:
-                        buf = oiio.ImageBuf(str(img_path))
-                        if not buf.has_error:
-                            res = oiio.ImageBufAlgo.colorconvert(buf, buf, cs_in, cs_out, colorconfig=colorconfig)
-                            if res:
-                                buf.write(str(img_path))
-                                return True, None
-                    except Exception as e:
-                        return False, str(e)
-                    return False, "OCIO Error"
-
-                elif _current_pipeline == "Apple Log -> sRGB (ACES Tone Mapped)":
-                    try:
-                        # Read image into OIIO buffer as float
-                        import cv2, numpy as np
-                        img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-                        if img is None:
-                            return False, "Failed to read image"
-                        max_val = 65535.0 if img.dtype == np.uint16 else 255.0
-                        if len(img.shape) == 3 and img.shape[2] >= 3:
-                            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
-                        else:
-                            return False, "Unsupported channels"
-
-                        h, w, ch = img_rgb.shape
-                        buf = oiio.ImageBuf(oiio.ImageSpec(w, h, ch, oiio.FLOAT))
-                        buf.set_pixels(oiio.ROI(), img_rgb)
-
-                        # Apple Log (Rec.2020 Camera) -> sRGB display via ACES RRT+ODT
-                        oiio.ImageBufAlgo.colorconvert(buf, buf,
-                            'Utility - Rec.2020 - Camera', 'Output - sRGB')
-
-                        # Write back as 16-bit PNG
-                        spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
-                        buf16 = oiio.ImageBuf(spec16)
-                        oiio.ImageBufAlgo.resize(buf16, buf)
-                        buf16.write(str(img_path))
-                        return True, None
-                    except Exception as e:
-                        return False, str(e)
-
-                elif _current_pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
-                    try:
-                        import cv2, numpy as np
-                        img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-                        if img is None:
-                            return False, "Failed to read image"
-                        max_val = 65535.0 if img.dtype == np.uint16 else 255.0
-                        if len(img.shape) == 3 and img.shape[2] >= 3:
-                            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
-                        else:
-                            return False, "Unsupported channels"
-
-                        h, w, ch = img_rgb.shape
-                        spec = oiio.ImageSpec(w, h, ch, oiio.FLOAT)
-
-                        # --- EXR: Apple Log (Rec.2020 Camera) -> ACEScg ---
-                        buf_aces = oiio.ImageBuf(spec)
-                        buf_aces.set_pixels(oiio.ROI(), img_rgb)
-                        oiio.ImageBufAlgo.colorconvert(buf_aces, buf_aces,
-                            'Utility - Rec.2020 - Camera', 'ACES - ACEScg')
-
-                        if exr_out_dir is not None:
-                            os.makedirs(exr_out_dir, exist_ok=True)
-                            out_path_exr = str(Path(exr_out_dir) / f"{img_path.stem}.exr")
-                        else:
-                            out_path_exr = str(img_path).rsplit('.', 1)[0] + '.exr'
-                        buf_aces.write(out_path_exr)
-
-                        # --- PNG: Apple Log (Rec.2020 Camera) -> sRGB for COLMAP ---
-                        buf_srgb = oiio.ImageBuf(spec)
-                        buf_srgb.set_pixels(oiio.ROI(), img_rgb)
-                        oiio.ImageBufAlgo.colorconvert(buf_srgb, buf_srgb,
-                            'Utility - Rec.2020 - Camera', 'Output - sRGB')
-
-                        spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
-                        buf16 = oiio.ImageBuf(spec16)
-                        oiio.ImageBufAlgo.resize(buf16, buf_srgb)
-                        buf16.write(str(img_path))
-
-                        return True, None
-                    except Exception as e:
-                        return False, str(e)
-                return False, "Unknown pipeline"
+            cfg_path = self.ocio_path.get() if _current_pipeline == "OCIO" else None
+            cs_in = self.ocio_in_cs.get() if _current_pipeline == "OCIO" else None
+            cs_out = self.ocio_out_cs.get() if _current_pipeline == "OCIO" else None
 
             success_count = 0
             errors = []
             threads = self.num_workers.get()
-            self._log_tagged(tag_prefix, f"       → Converting {total_color} images with {threads} threads...")
+            self._log_tagged(tag_prefix, f"       → Converting {total_color} images with {threads} processes...")
             
+            exr_dir_str = str(exr_out_dir) if exr_out_dir else None
+
             with tqdm_module.tqdm(total=total_color, desc="Color Conversion") as pbar:
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=threads) as executor:
-                    results = executor.map(process_image_color, all_images)
-                    for res, err in results:
+                from concurrent.futures import ProcessPoolExecutor, as_completed
+                # Pass data as strings/built-in types to avoid pickling issues
+                futures = []
+                with ProcessPoolExecutor(max_workers=threads) as executor:
+                    for img_path in all_images:
+                        futures.append(executor.submit(
+                            _process_image_color_worker, 
+                            str(img_path), 
+                            _current_pipeline, 
+                            cs_in, cs_out, cfg_path, exr_dir_str
+                        ))
+                    
+                    for future in as_completed(futures):
+                        if self._cancelled:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        res, err = future.result()
                         if res:
                             success_count += 1
                         else:
