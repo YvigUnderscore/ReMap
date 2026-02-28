@@ -127,12 +127,12 @@ def _convert_images_colorspace(images_dir: Path, from_space: str, to_space: str,
     converted = 0
     for img_path in image_files:
         buf = oiio.ImageBuf(str(img_path))
-        if buf.has_error():
+        if buf.has_error:
             if logger_fn:
                 logger_fn(f"  ⚠ Could not read {img_path.name}, skipping colorspace conversion")
             continue
         result = oiio.ImageBufAlgo.colorconvert(buf, from_space, to_space)
-        if result.has_error():
+        if result.has_error:
             if logger_fn:
                 logger_fn(f"  ⚠ Colorspace conversion failed for {img_path.name}: {result.geterror()}")
             continue
