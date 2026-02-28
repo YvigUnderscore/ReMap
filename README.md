@@ -2,7 +2,7 @@
 
 **ReMap** is a desktop pipeline to prepare your 3D captures for [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). It takes videos or LiDAR scans as input and produces a fully reconstructed COLMAP dataset, ready for training.
 
-It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscore/ReScan), our iOS LiDAR capture app. Together, they form a complete end-to-end workflow: **capture on iPhone → process on desktop → train your Gaussian Splat.**
+It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscore/ReScan), our iOS LiDAR capture app. Together, they form a complete end-to-end workflow: **capture on iPhone → process on desktop → train your Gaussian Splat. (trough another software)**
 
 ---
 
