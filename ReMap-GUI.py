@@ -2123,51 +2123,51 @@ class SfMApp(ctk.CTk):
                         self._log_tagged("[CPU]", f"{ds_tag}   → {_deleted} intermediate PNG "
                                          "file(s) removed")
                         self._log_tagged("[CPU]", f"{ds_tag}   ✓ EXR remapping complete")
-                        # Move images/ into sparse/0/models/0/0/
-                        shutil.move(str(ds_images), str(ds_models))
-                        self._log_tagged("[CPU]", f"{ds_tag}   → images/ moved to {ds_models.relative_to(ds_out)}")
-                        # Update sparse model so image paths point to new location
-                        try:
-                            _prefix = "models/0/0/images/"
-                            _bin_path = ds_sfm / "images.bin"
-                            if _bin_path.exists():
-                                _images_data = _read_images_bin(_bin_path)
-                                _prefixed = 0
-                                for _img2 in _images_data:
-                                    if not _img2["name"].startswith(_prefix):
-                                        _img2["name"] = _prefix + _img2["name"]
-                                        _prefixed += 1
-                                if _prefixed > 0:
-                                    _write_images_bin(_bin_path, _images_data)
-                                    self._log_tagged("[CPU]", f"{ds_tag}   → Sparse model updated: "
-                                                     f"{_prefixed} image path(s) prefixed "
-                                                     f"with '{_prefix}'")
-                            else:
-                                self._log_tagged("[CPU]", f"{ds_tag}   ⚠ images.bin not found")
-                        except Exception as _exc2:
-                            self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not update sparse "
-                                             f"model image paths: {_exc2}")
+                    # Move images/ into sparse/0/models/0/0/
+                    shutil.move(str(ds_images), str(ds_models))
+                    self._log_tagged("[CPU]", f"{ds_tag}   → images/ moved to {ds_models.relative_to(ds_out)}")
+                    # Update sparse model so image paths point to new location
+                    try:
+                        _prefix = "models/0/0/images/"
+                        _bin_path = ds_sfm / "images.bin"
+                        if _bin_path.exists():
+                            _images_data = _read_images_bin(_bin_path)
+                            _prefixed = 0
+                            for _img2 in _images_data:
+                                if not _img2["name"].startswith(_prefix):
+                                    _img2["name"] = _prefix + _img2["name"]
+                                    _prefixed += 1
+                            if _prefixed > 0:
+                                _write_images_bin(_bin_path, _images_data)
+                                self._log_tagged("[CPU]", f"{ds_tag}   → Sparse model updated: "
+                                                 f"{_prefixed} image path(s) prefixed "
+                                                 f"with '{_prefix}'")
+                        else:
+                            self._log_tagged("[CPU]", f"{ds_tag}   ⚠ images.bin not found")
+                    except Exception as _exc2:
+                        self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not update sparse "
+                                         f"model image paths: {_exc2}")
 
-                        # Copy the updated .bin files into models/0/0/ so that directory
-                        # contains the fully up-to-date reconstruction (EXR names + prefix),
-                        # overwriting any stale SfM output that may have been left there.
-                        for _bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
-                            _src_bin = ds_sfm / _bin_fname
-                            if _src_bin.exists():
-                                shutil.copy2(str(_src_bin), str(ds_models / _bin_fname))
-                        self._log_tagged("[CPU]", f"{ds_tag}   → Updated sparse .bin files copied to {ds_models.relative_to(ds_out)}")
-                        # Clean up non-essential intermediate files and stale
-                        # text-format sparse model files (only binary .bin files
-                        # are kept up-to-date by pycolmap; the .txt versions
-                        # written by stray_to_colmap still reference .png names).
-                        for _fname in ["database.db",
-                                       "cameras.txt", "images.txt", "points3D.txt"]:
-                            _f = ds_sfm / _fname
-                            if _f.exists():
-                                try:
-                                    _f.unlink()
-                                except PermissionError:
-                                    self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not remove {_f.name} (file in use) — skipping")
+                    # Copy the updated .bin files into models/0/0/ so that directory
+                    # contains the fully up-to-date reconstruction (EXR names + prefix),
+                    # overwriting any stale SfM output that may have been left there.
+                    for _bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
+                        _src_bin = ds_sfm / _bin_fname
+                        if _src_bin.exists():
+                            shutil.copy2(str(_src_bin), str(ds_models / _bin_fname))
+                    self._log_tagged("[CPU]", f"{ds_tag}   → Updated sparse .bin files copied to {ds_models.relative_to(ds_out)}")
+                    # Clean up non-essential intermediate files and stale
+                    # text-format sparse model files (only binary .bin files
+                    # are kept up-to-date by pycolmap; the .txt versions
+                    # written by stray_to_colmap still reference .png names).
+                    for _fname in ["database.db",
+                                   "cameras.txt", "images.txt", "points3D.txt"]:
+                        _f = ds_sfm / _fname
+                        if _f.exists():
+                            try:
+                                _f.unlink()
+                            except PermissionError:
+                                self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not remove {_f.name} (file in use) — skipping")
                         # Remove stale SfM output in models/0/ (GLOMAP copies)
                         _sfm_model0 = ds_sfm / "models" / "0"
                         if _sfm_model0.is_dir():

@@ -683,53 +683,52 @@ def _run_job(job_id: str):
             num_threads=num_threads,
         )
 
-        # ── Post-EXR: move images/ to sparse/0/models/0/0/ and update sparse ──
-        if stray_result and stray_result.get("has_exr_source", False):
-            models_final = sfm_dir / "models" / "0" / "0"
-            models_final.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(images_dir), str(models_final))
-            job_logger("  → images/ moved to sparse/0/models/0/0/")
-            # Update sparse model so image paths point to new location
-            _prefix_images_in_reconstruction(sfm_dir, "models/0/0/images/", job_logger)
-            # Copy the updated .bin files into models/0/0/ so that directory
-            # contains the fully up-to-date reconstruction (EXR names + prefix),
-            # overwriting any stale SfM output that may have been left there.
-            for bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
-                src_bin = sfm_dir / bin_fname
-                if src_bin.exists():
-                    shutil.copy2(str(src_bin), str(models_final / bin_fname))
-            job_logger("  → Updated sparse .bin files copied to sparse/0/models/0/0/")
-            # Clean up non-essential intermediate files and stale text-format
-            # sparse model files (only binary .bin files are kept up-to-date by
-            # pycolmap; the .txt versions written by stray_to_colmap would still
-            # reference the old .png names).
-            for fname in ["database.db",
-                          "cameras.txt", "images.txt", "points3D.txt"]:
-                f = sfm_dir / fname
-                if f.exists():
-                    try:
-                        f.unlink()
-                    except PermissionError:
-                        job_logger(f"  ⚠ Could not remove {f.name} (file in use) — skipping")
-            # Remove stale SfM output left in models/0/ (GLOMAP copies, not moves)
-            sfm_model0 = sfm_dir / "models" / "0"
-            if sfm_model0.is_dir():
-                for stale in ("cameras.bin", "images.bin", "points3D.bin"):
-                    sf = sfm_model0 / stale
-                    if sf.exists():
-                        try:
-                            sf.unlink()
-                        except PermissionError:
-                            job_logger(f"  ⚠ Could not remove {sf.name} (file in use) — skipping")
-            for log_f in sfm_dir.glob("colmap.LOG*"):
+        # ── Post-SfM: move images/ to sparse/0/models/0/0/ and update sparse ──
+        models_final = sfm_dir / "models" / "0" / "0"
+        models_final.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(images_dir), str(models_final))
+        job_logger("  → images/ moved to sparse/0/models/0/0/")
+        # Update sparse model so image paths point to new location
+        _prefix_images_in_reconstruction(sfm_dir, "models/0/0/images/", job_logger)
+        # Copy the updated .bin files into models/0/0/ so that directory
+        # contains the fully up-to-date reconstruction (EXR names + prefix),
+        # overwriting any stale SfM output that may have been left there.
+        for bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
+            src_bin = sfm_dir / bin_fname
+            if src_bin.exists():
+                shutil.copy2(str(src_bin), str(models_final / bin_fname))
+        job_logger("  → Updated sparse .bin files copied to sparse/0/models/0/0/")
+        # Clean up non-essential intermediate files and stale text-format
+        # sparse model files (only binary .bin files are kept up-to-date by
+        # pycolmap; the .txt versions written by stray_to_colmap would still
+        # reference the old .png names).
+        for fname in ["database.db",
+                        "cameras.txt", "images.txt", "points3D.txt"]:
+            f = sfm_dir / fname
+            if f.exists():
                 try:
-                    log_f.unlink()
+                    f.unlink()
                 except PermissionError:
-                    # On Windows, COLMAP/GLOMAP may still hold the log file
-                    # open for a brief moment after the process exits.
-                    # This is non-critical: skip the file silently.
-                    job_logger(f"  ⚠ Could not remove {log_f.name} (file in use) — skipping")
-            job_logger("  → Intermediate files cleaned up from sparse/0/")
+                    job_logger(f"  ⚠ Could not remove {f.name} (file in use) — skipping")
+        # Remove stale SfM output left in models/0/ (GLOMAP copies, not moves)
+        sfm_model0 = sfm_dir / "models" / "0"
+        if sfm_model0.is_dir():
+            for stale in ("cameras.bin", "images.bin", "points3D.bin"):
+                sf = sfm_model0 / stale
+                if sf.exists():
+                    try:
+                        sf.unlink()
+                    except PermissionError:
+                        job_logger(f"  ⚠ Could not remove {sf.name} (file in use) — skipping")
+        for log_f in sfm_dir.glob("colmap.LOG*"):
+            try:
+                log_f.unlink()
+            except PermissionError:
+                # On Windows, COLMAP/GLOMAP may still hold the log file
+                # open for a brief moment after the process exits.
+                # This is non-critical: skip the file silently.
+                job_logger(f"  ⚠ Could not remove {log_f.name} (file in use) — skipping")
+        job_logger("  → Intermediate files cleaned up from sparse/0/")
 
         _update_job(job_id, status="completed", progress=100, current_step="Done")
         _append_log(job_id, "Pipeline finished successfully")
