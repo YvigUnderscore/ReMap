@@ -10,7 +10,7 @@ It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscor
 
 ```text
 ┌─────────────────────┐         ┌─────────────────────┐         ┌──────────────────────┐
-│      📱 ReScan      │   API   │      🖥️ ReMap       │  output │   🎯 3DGS Training   │
+│      📱 ReScan      │   API   │      🖥️ ReMap      │  output │   🎯 3DGS Training   │
 │   (iOS Capture)     │ ──────► │  (Desktop Pipeline) │ ──────► │  (Nerfstudio, etc.)  │
 │                     │         │                     │         │                      │
 │ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • models/0/0/        │
