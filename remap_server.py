@@ -112,6 +112,114 @@ def _append_log(job_id: str, message: str):
             )
 
 
+def _rename_images_in_reconstruction(sfm_dir: Path, old_ext: str, new_ext: str,
+                                      logger_fn=None) -> None:
+    """Rename image file extensions in a COLMAP sparse reconstruction."""
+    try:
+        import pycolmap
+        recon = pycolmap.Reconstruction(str(sfm_dir))
+        renamed = 0
+        for image_id, image in recon.images.items():
+            if image.name.endswith(old_ext):
+                image.name = image.name[:-len(old_ext)] + new_ext
+                renamed += 1
+        if renamed > 0:
+            recon.write(str(sfm_dir))
+            if logger_fn:
+                logger_fn(f"  → Sparse model updated: {renamed} image reference(s) renamed "
+                          f"({old_ext} → {new_ext})")
+    except Exception as exc:
+        if logger_fn:
+            logger_fn(f"  ⚠ Could not update sparse model image names: {exc}")
+
+
+def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
+                       output_colorspace: str | None, logger_fn=None) -> None:
+    """Post-processing: replace intermediate PNGs with colorspace-converted EXR files.
+
+    When the source dataset contained EXR images (``rgb/`` directory), SfM was
+    run on PNG copies.  After reconstruction this step:
+    1. Copies the original EXR files from the source ``rgb/`` directory into
+       ``images/``.
+    2. Applies the requested output OCIO colorspace conversion to the EXR
+       files (if any).
+    3. Rewrites the sparse model so image names reference ``.exr`` instead of
+       ``.png``.
+    4. Deletes the intermediate PNG files from ``images/``.
+    """
+    if not stray_result.get("has_exr_source", False):
+        return
+
+    frame_to_filename = stray_result.get("frame_to_filename", {})
+    input_dir = stray_result.get("input_dir")
+    if not input_dir or not frame_to_filename:
+        return
+
+    input_dir = Path(input_dir)
+    rgb_dir = input_dir / "rgb"
+
+    if logger_fn:
+        logger_fn("  EXR remapping: copying original EXR files to images/")
+
+    # 1. Copy original EXR files
+    copied = 0
+    for frame_idx, png_name in frame_to_filename.items():
+        exr_src = rgb_dir / f"{frame_idx:06d}.exr"
+        if not exr_src.exists():
+            if logger_fn:
+                logger_fn(f"  ⚠ Missing source EXR: {exr_src.name}")
+            continue
+        exr_dst_name = png_name.removesuffix(".png") + ".exr"
+        exr_dst = images_dir / exr_dst_name
+        shutil.copy2(exr_src, exr_dst)
+        copied += 1
+
+    if logger_fn:
+        logger_fn(f"  → {copied} EXR file(s) copied to images/")
+
+    # 2. Apply output colorspace conversion to EXR files
+    if output_colorspace:
+        import OpenImageIO as oiio
+        to_cs = SUPPORTED_COLORSPACES[output_colorspace]
+        if to_cs != _INTERNAL_COLORSPACE:
+            converted = 0
+            for frame_idx, png_name in frame_to_filename.items():
+                exr_dst_name = png_name.removesuffix(".png") + ".exr"
+                exr_dst = images_dir / exr_dst_name
+                if not exr_dst.exists():
+                    continue
+                buf = oiio.ImageBuf(str(exr_dst))
+                if buf.has_error:
+                    if logger_fn:
+                        logger_fn(f"  ⚠ Could not read {exr_dst.name} for colorspace conversion")
+                    continue
+                result = oiio.ImageBufAlgo.colorconvert(buf, _INTERNAL_COLORSPACE, to_cs)
+                if result.has_error:
+                    if logger_fn:
+                        logger_fn(f"  ⚠ Colorspace conversion failed for {exr_dst.name}: "
+                                  f"{result.geterror()}")
+                    continue
+                result.write(str(exr_dst))
+                converted += 1
+            if logger_fn:
+                logger_fn(f"  → {converted} EXR file(s) converted "
+                          f"from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
+
+    # 3. Rename image entries in the sparse model (png → exr)
+    _rename_images_in_reconstruction(sfm_dir, ".png", ".exr", logger_fn)
+
+    # 4. Delete intermediate PNG files
+    deleted = 0
+    for _, png_name in frame_to_filename.items():
+        png_path = images_dir / png_name
+        if png_path.exists():
+            png_path.unlink()
+            deleted += 1
+    if logger_fn:
+        logger_fn(f"  → {deleted} intermediate PNG file(s) removed")
+        logger_fn("  ✓ EXR remapping complete")
+
+
 def _convert_images_colorspace(images_dir: Path, from_space: str, to_space: str,
                                 logger_fn=None) -> int:
     """Convert all images in *images_dir* from *from_space* to *to_space*.
@@ -218,9 +326,13 @@ def _run_job(job_id: str):
         # Default to 60 FPS (common for iPhone ReScan captures) when ffprobe
         # is unavailable or the probe fails.
         import subprocess
+        import csv as _csv
         video_candidates = list(dataset_dir.glob("rgb.*"))
         native_fps = _DEFAULT_NATIVE_FPS
+        video_found = False
         for vc in video_candidates:
+            if not vc.is_file():
+                continue
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -230,10 +342,58 @@ def _run_job(job_id: str):
                 )
                 num, den = probe.stdout.strip().split("/")
                 native_fps = float(num) / float(den)
+                video_found = True
                 break
             except Exception:
                 job_logger(f"  ⚠ Could not probe video FPS, using default ({_DEFAULT_NATIVE_FPS} FPS)")
+
+        # For image-sequence datasets (no video file), derive native_fps from
+        # odometry.csv timestamps — same logic as the GUI's _probe_rescan_dataset.
+        n_poses = None
+        if not video_found:
+            odom_path = dataset_dir / "odometry.csv"
+            try:
+                with open(odom_path) as _f:
+                    _reader = _csv.reader(_f)
+                    next(_reader, None)  # skip header
+                    first_ts: float | None = None
+                    last_ts: float | None = None
+                    count = 0
+                    for row in _reader:
+                        if row:
+                            ts = float(row[0].strip())
+                            if first_ts is None:
+                                first_ts = ts
+                            last_ts = ts
+                            count += 1
+                n_poses = count
+                if count > 1 and first_ts is not None and last_ts is not None:
+                    duration = last_ts - first_ts
+                    if duration > 0:
+                        odometry_fps = count / duration
+                        if odometry_fps > 0.1:
+                            native_fps = odometry_fps
+                            job_logger(f"  → Image sequence: native FPS computed from "
+                                       f"odometry.csv = {native_fps:.2f}")
+            except Exception as exc:
+                job_logger(f"  ⚠ Could not compute FPS from odometry.csv ({exc}), "
+                           f"using default {_DEFAULT_NATIVE_FPS} FPS")
+
         computed_subsample = max(1, round(native_fps / fps))
+
+        # Safety check: ensure at least 2 frames will be selected so that SfM
+        # can form image pairs.  This guards against extreme subsample values
+        # that occur when native_fps falls back to the 60 FPS default but the
+        # dataset contains very few odometry poses.
+        if n_poses is not None and n_poses > 0:
+            # Ceiling division: number of elements in all_frame_indices[::computed_subsample]
+            n_selected = (n_poses + computed_subsample - 1) // computed_subsample
+            if n_selected < 2:
+                new_subsample = max(1, n_poses // 2)
+                job_logger(f"  ⚠ subsample={computed_subsample} would select only "
+                           f"{n_selected} frame(s) from {n_poses} poses; "
+                           f"auto-reducing to {new_subsample}")
+                computed_subsample = new_subsample
 
         try:
             stray_confidence = int(settings.get("stray_confidence", 2))
@@ -356,6 +516,15 @@ def _run_job(job_id: str):
             job_logger(f"  Colorspace: converting output images from '{_INTERNAL_COLORSPACE}' → '{to_cs}'")
             n = _convert_images_colorspace(images_dir, _INTERNAL_COLORSPACE, to_cs, job_logger)
             job_logger(f"  ✓ {n} image(s) converted from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
+
+        # ── Optional: EXR remapping (when source was EXR image sequence) ──
+        _remap_exr_sources(
+            stray_result=stray_result,
+            sfm_dir=sfm_dir,
+            images_dir=images_dir,
+            output_colorspace=output_colorspace,
+            logger_fn=job_logger,
+        )
 
         _update_job(job_id, status="completed", progress=100, current_step="Done")
         _append_log(job_id, "Pipeline finished successfully")
