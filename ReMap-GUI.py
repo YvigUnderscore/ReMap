@@ -25,16 +25,78 @@ except ImportError:
     oiio = None
     HAS_OCIO = False
 
-# --- Apple Log Color Math ---
+# --- Color Space Conversion System ---
+# Source profiles: describes what the input data looks like
+COLOR_SOURCES = [
+    "Auto-detect",
+    "Linear BT.2020",
+    "Apple Log (BT.2020)",
+    "Linear sRGB",
+    "sRGB (Rec.709)",
+    "HLG (BT.2020)",
+]
+
+# Destination profiles: where we want to go
+COLOR_DESTINATIONS = [
+    "ACEScg (EXR + sRGB PNG)",
+    "Linear sRGB",
+    "sRGB (Tone Mapped)",
+    "Custom OCIO...",
+]
+
+# ffprobe metadata → source profile mapping
+_FFPROBE_TO_SOURCE = {
+    ("bt2020", "linear"):           "Linear BT.2020",
+    ("bt2020", "alog"):             "Apple Log (BT.2020)",
+    ("bt2020", "arib-std-b67"):     "HLG (BT.2020)",
+    ("bt709", "bt709"):             "sRGB (Rec.709)",
+    ("bt709", "linear"):            "Linear sRGB",
+    ("bt709", "iec61966-2-1"):      "sRGB (Rec.709)",
+    ("bt709", "srgb"):              "sRGB (Rec.709)",
+}
+
+# --- Gamut Matrices (computed from CIE XYZ with Bradford D65↔D60 adaptation) ---
+# BT.2020 → ACEScg (AP1)
+_MAT_BT2020_TO_ACESCG = np.array([
+    [ 0.97990525,  0.02225227, -0.03192382],
+    [-0.00058388,  0.99476128,  0.01081350],
+    [ 0.00046861,  0.01941638,  1.06066918]
+], dtype=np.float32)
+
+# ACEScg (AP1) → sRGB (Rec.709) — for dual-output PNG generation
+_MAT_ACESCG_TO_SRGB = np.array([
+    [ 1.70298067, -0.62451279, -0.03670953],
+    [-0.12985749,  1.14073295, -0.01436027],
+    [-0.02069324, -0.12236011,  1.05442752]
+], dtype=np.float32)
+
+# BT.2020 → sRGB (Rec.709)
+_MAT_BT2020_TO_SRGB = np.array([
+    [ 1.66022663, -0.58754766, -0.07283817],
+    [-0.12455332,  1.13292610, -0.00834968],
+    [-0.01815514, -0.10060303,  1.11899821]
+], dtype=np.float32)
+
+# sRGB (Rec.709) → ACEScg (AP1)
+_MAT_SRGB_TO_ACESCG = np.array([
+    [0.61590865, 0.34031053, 0.01410133],
+    [0.06855723, 0.91546150, 0.02095702],
+    [0.01902455, 0.11135884, 0.94994319]
+], dtype=np.float32)
+
+
+def _apply_matrix(rgb, matrix):
+    """Apply a 3×3 color matrix to an (H, W, 3) or (N, 3) array."""
+    orig_shape = rgb.shape
+    flat = rgb.reshape(-1, 3)
+    result = np.dot(flat, matrix.T)
+    return result.reshape(orig_shape)
+
+
 def _apple_log_to_linear(P):
     """
-    Decode Apple Log encoded values to scene-linear Rec.2020.
+    Decode Apple Log encoded values to scene-linear.
     Based on Apple Log Profile White Paper.
-
-    OETF (encoding):  E = c * log2(a*R + b) + d    for R >= R_cut
-                      E = e*R + f                   for R < R_cut
-    EOTF (decoding):  R = (2^((E-d)/c) - b) / a    for E >= E_cut
-                      R = (E - f) / e               for E < E_cut
     """
     R_cut = 0.00104
     a = 5.555556
@@ -53,36 +115,79 @@ def _apple_log_to_linear(P):
     )
     return np.maximum(R, 0.0)
 
-def _rec2020_to_srgb(rgb_linear):
-    """
-    Convert Linear RGB from Rec.2020 to Linear sRGB (Rec.709) gamut.
-    """
-    M = np.array([
-        [ 1.660491, -0.587641, -0.072850],
-        [-0.224251,  1.167812,  0.056439],
-        [ 0.011400, -0.042258,  1.030858]
-    ], dtype=np.float32)
-    orig_shape = rgb_linear.shape
-    rgb_flat = rgb_linear.reshape(-1, 3)
-    rgb_srgb = np.dot(rgb_flat, M.T)
-    return rgb_srgb.reshape(orig_shape)
 
-def _aces_tonemap(x):
+def _hlg_eotf(E):
     """
-    Narkowicz ACES filmic tone mapping curve.
+    Hybrid Log-Gamma (HLG) OETF inverse — decode HLG signal to scene-linear.
+    ITU-R BT.2100.
     """
-    a = 2.51
-    b = 0.03
-    c = 2.43
-    d = 0.59
-    e = 0.14
-    return np.clip((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
+    a = 0.17883277
+    b = 1.0 - 4.0 * a
+    c = 0.5 - a * np.log(4.0 * a)
+    E = np.asarray(E, dtype=np.float32)
+    return np.where(
+        E <= 0.5,
+        (E ** 2) / 3.0,
+        (np.exp((E - c) / a) + b) / 12.0
+    )
+
+
+def _srgb_eotf(E):
+    """sRGB gamma decode (sRGB display → linear)."""
+    E = np.asarray(E, dtype=np.float32)
+    return np.where(
+        E <= 0.04045,
+        E / 12.92,
+        np.power(np.maximum((E + 0.055) / 1.055, 0.0), 2.4)
+    )
+
 
 def _srgb_oetf(x):
-    """
-    sRGB gamma encoding (linear to sRGB display).
-    """
-    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-7), 1/2.4) - 0.055)
+    """sRGB gamma encoding (linear → sRGB display)."""
+    return np.where(x <= 0.0031308, 12.92 * x,
+                    1.055 * np.power(np.maximum(x, 1e-7), 1/2.4) - 0.055)
+
+
+def _aces_tonemap(x):
+    """Narkowicz ACES filmic tone mapping curve."""
+    a = 2.51; b = 0.03; c = 2.43; d = 0.59; e = 0.14
+    return np.clip((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
+
+
+def _linearize(rgb_norm, source):
+    """Apply the correct EOTF based on source profile → scene-linear RGB."""
+    if source in ("Linear BT.2020", "Linear sRGB"):
+        return rgb_norm  # already linear
+    elif source == "Apple Log (BT.2020)":
+        return _apple_log_to_linear(rgb_norm)
+    elif source == "HLG (BT.2020)":
+        return _hlg_eotf(rgb_norm)
+    elif source == "sRGB (Rec.709)":
+        return _srgb_eotf(rgb_norm)
+    return rgb_norm
+
+
+def _source_primaries(source):
+    """Return 'bt2020' or 'srgb' for a given source profile."""
+    if source in ("Linear BT.2020", "Apple Log (BT.2020)", "HLG (BT.2020)"):
+        return "bt2020"
+    return "srgb"
+
+
+def _gamut_convert(rgb_linear, src_primaries, dst_primaries):
+    """Convert between gamuts using pre-computed 3×3 matrices."""
+    key = (src_primaries, dst_primaries)
+    matrices = {
+        ("bt2020", "acescg"):  _MAT_BT2020_TO_ACESCG,
+        ("bt2020", "srgb"):    _MAT_BT2020_TO_SRGB,
+        ("srgb",   "acescg"):  _MAT_SRGB_TO_ACESCG,
+        ("acescg", "srgb"):    _MAT_ACESCG_TO_SRGB,
+    }
+    if key in matrices:
+        return _apply_matrix(rgb_linear, matrices[key])
+    if src_primaries == dst_primaries:
+        return rgb_linear
+    return rgb_linear  # fallback: no conversion
 
 # --- Theme & Colors ---
 try:
@@ -130,21 +235,25 @@ def generate_sequential_pairs(image_dir, pairs_path, overlap=10):
         f.writelines(' '.join(p) + '\n' for p in pairs)
 
 
-def _process_image_color_worker(img_path_str, pipeline, cs_in, cs_out, colorconfig_path, exr_out_dir_str):
+def _process_image_color_worker(img_path_str, source_space, dest_space, cs_in, cs_out, colorconfig_path, exr_out_dir_str):
     """
-    Top-level worker function for parallel color conversion via ProcessPoolExecutor.
-    Receives only picklable arguments.
+    Modular color conversion worker for ProcessPoolExecutor.
+
+    Pipeline:  Read → Normalize → Linearize (EOTF) → Gamut Matrix → Encode → Write
+
+    Args:
+        source_space:  Source profile (e.g. "Linear BT.2020", "Apple Log (BT.2020)")
+        dest_space:    Destination profile (e.g. "ACEScg (EXR + sRGB PNG)", "sRGB (Tone Mapped)")
+        cs_in/cs_out:  OCIO colorspace names (only used when dest_space == "Custom OCIO...")
+        colorconfig_path: Path to .ocio config (only for Custom OCIO)
+        exr_out_dir_str:  Directory for EXR output (for dual-output modes)
     Returns: (success_bool, error_msg_or_none)
     """
+    import cv2, numpy as np
     img_path = Path(img_path_str)
-    try:
-        if HAS_OCIO:
-            oiio.attribute("opencl:enable", 1)
-            oiio.attribute("use_opengl", 1)
-    except Exception:
-        pass
 
-    if pipeline == "OCIO" and HAS_OCIO:
+    # --- Custom OCIO passthrough ---
+    if dest_space == "Custom OCIO..." and HAS_OCIO:
         try:
             buf = oiio.ImageBuf(str(img_path))
             if not buf.has_error:
@@ -156,84 +265,83 @@ def _process_image_color_worker(img_path_str, pipeline, cs_in, cs_out, colorconf
             return False, str(e)
         return False, "OCIO Error"
 
-    elif pipeline == "Apple Log -> sRGB (ACES Tone Mapped)":
+    # --- Native math pipeline ---
+    try:
+        img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return False, "Failed to read image"
+        max_val = 65535.0 if img.dtype == np.uint16 else 255.0
+        if len(img.shape) < 3 or img.shape[2] < 3:
+            return False, "Unsupported channels"
+
+        # BGR(A) → RGB, normalize to [0,1] float32
         try:
-            import cv2, numpy as np
-            img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-            if img is None:
-                return False, "Failed to read image"
-            max_val = 65535.0 if img.dtype == np.uint16 else 255.0
-            if len(img.shape) == 3 and img.shape[2] >= 3:
-                try:
-                    gpu_img = cv2.cuda_GpuMat()
-                    gpu_img.upload(img)
-                    gpu_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB)
-                    img_rgb = gpu_rgb.download().astype(np.float32) / max_val
-                except Exception:
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
-            else:
-                return False, "Unsupported channels"
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(img)
+            gpu_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB)
+            img_rgb = gpu_rgb.download().astype(np.float32) / max_val
+        except Exception:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
 
-            h, w, ch = img_rgb.shape
-            buf = oiio.ImageBuf(oiio.ImageSpec(w, h, ch, oiio.FLOAT))
-            buf.set_pixels(oiio.ROI(), img_rgb)
+        h, w, ch = img_rgb.shape
 
-            oiio.ImageBufAlgo.colorconvert(buf, buf, 'Utility - Rec.2020 - Camera', 'Output - sRGB')
+        # Step 1: Linearize (apply EOTF based on source)
+        linear_rgb = _linearize(img_rgb, source_space)
 
-            spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
-            buf16 = oiio.ImageBuf(spec16)
-            oiio.ImageBufAlgo.resize(buf16, buf)
-            buf16.write(str(img_path))
-            return True, None
-        except Exception as e:
-            return False, str(e)
+        # Step 2: Determine source and destination gamut primaries
+        src_prim = _source_primaries(source_space)
 
-    elif pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
-        try:
-            import cv2, numpy as np
-            img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-            if img is None:
-                return False, "Failed to read image"
-            max_val = 65535.0 if img.dtype == np.uint16 else 255.0
-            if len(img.shape) == 3 and img.shape[2] >= 3:
-                try:
-                    gpu_img = cv2.cuda_GpuMat()
-                    gpu_img.upload(img)
-                    gpu_rgb = cv2.cuda.cvtColor(gpu_img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB)
-                    img_rgb = gpu_rgb.download().astype(np.float32) / max_val
-                except Exception:
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGB).astype(np.float32) / max_val
-            else:
-                return False, "Unsupported channels"
+        if dest_space == "ACEScg (EXR + sRGB PNG)":
+            # --- ACEScg dual output: EXR (linear ACEScg) + sRGB PNG ---
+            acescg_rgb = _gamut_convert(linear_rgb, src_prim, "acescg")
 
-            h, w, ch = img_rgb.shape
-            spec = oiio.ImageSpec(w, h, ch, oiio.FLOAT)
-
-            buf_aces = oiio.ImageBuf(spec)
-            buf_aces.set_pixels(oiio.ROI(), img_rgb)
-            oiio.ImageBufAlgo.colorconvert(buf_aces, buf_aces, 'Utility - Rec.2020 - Camera', 'ACES - ACEScg')
-
+            # Write EXR (ACEScg linear, 32-bit float)
             if exr_out_dir_str:
                 os.makedirs(exr_out_dir_str, exist_ok=True)
-                out_path_exr = str(Path(exr_out_dir_str) / f"{img_path.stem}.exr")
+                out_exr = str(Path(exr_out_dir_str) / f"{img_path.stem}.exr")
             else:
-                out_path_exr = str(img_path).rsplit('.', 1)[0] + '.exr'
-            buf_aces.write(out_path_exr)
+                out_exr = str(img_path).rsplit('.', 1)[0] + '.exr'
 
-            buf_srgb = oiio.ImageBuf(spec)
-            buf_srgb.set_pixels(oiio.ROI(), img_rgb)
-            oiio.ImageBufAlgo.colorconvert(buf_srgb, buf_srgb, 'Utility - Rec.2020 - Camera', 'Output - sRGB')
+            if HAS_OCIO:
+                spec_exr = oiio.ImageSpec(w, h, ch, oiio.FLOAT)
+                buf_exr = oiio.ImageBuf(spec_exr)
+                buf_exr.set_pixels(oiio.ROI(), acescg_rgb)
+                buf_exr.write(out_exr)
+            else:
+                # Fallback: write via cv2 (limited EXR support)
+                exr_bgr = cv2.cvtColor(acescg_rgb, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(out_exr, exr_bgr)
 
-            spec16 = oiio.ImageSpec(w, h, ch, oiio.UINT16)
-            buf16 = oiio.ImageBuf(spec16)
-            oiio.ImageBufAlgo.resize(buf16, buf_srgb)
-            buf16.write(str(img_path))
-
+            # Write sRGB PNG (tone mapped, 16-bit) — for SfM
+            srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
+            srgb_tonemapped = _aces_tonemap(np.maximum(srgb_linear, 0.0))
+            srgb_display = _srgb_oetf(srgb_tonemapped)
+            srgb_16 = np.clip(srgb_display * 65535, 0, 65535).astype(np.uint16)
+            srgb_bgr = cv2.cvtColor(srgb_16, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(img_path), srgb_bgr)
             return True, None
-        except Exception as e:
-            return False, str(e)
-            
-    return False, "Unknown pipeline"
+
+        elif dest_space == "sRGB (Tone Mapped)":
+            # --- sRGB tone-mapped output (16-bit PNG) ---
+            srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
+            srgb_tonemapped = _aces_tonemap(np.maximum(srgb_linear, 0.0))
+            srgb_display = _srgb_oetf(srgb_tonemapped)
+            srgb_16 = np.clip(srgb_display * 65535, 0, 65535).astype(np.uint16)
+            srgb_bgr = cv2.cvtColor(srgb_16, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(img_path), srgb_bgr)
+            return True, None
+
+        elif dest_space == "Linear sRGB":
+            # --- Linear sRGB (16-bit PNG, no gamma) ---
+            srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
+            srgb_16 = np.clip(srgb_linear * 65535, 0, 65535).astype(np.uint16)
+            srgb_bgr = cv2.cvtColor(srgb_16, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(img_path), srgb_bgr)
+            return True, None
+
+        return False, f"Unknown destination: {dest_space}"
+    except Exception as e:
+        return False, str(e)
 
 def _detect_16bit_from_images(image_dir):
     """Check if existing images in a directory are 16-bit."""
@@ -524,14 +632,17 @@ class SfMApp(ctk.CTk):
         self.stray_depth_subsample = ctk.IntVar(value=2)
         self.stray_gen_pointcloud = ctk.BooleanVar(value=True)
 
-        # OCIO variables
-        self.color_pipeline = ctk.StringVar(value="None")
+        # Color conversion variables (Source/Destination system)
+        self.color_enabled = ctk.BooleanVar(value=False)
+        self.color_source = ctk.StringVar(value="Auto-detect")
+        self.color_dest = ctk.StringVar(value="ACEScg (EXR + sRGB PNG)")
+        self.detected_color_profile = ctk.StringVar(value="")  # Filled by ffprobe
+        # OCIO (kept for "Custom OCIO..." destination)
         self.ocio_path = ctk.StringVar(value=os.environ.get("OCIO", ""))
         self.ocio_in_cs = ctk.StringVar(value="")
         self.ocio_out_cs = ctk.StringVar(value="")
         self.ocio_spaces = []
         self.has_ocio_lib = HAS_OCIO
-        self.use_ocio = ctk.BooleanVar(value=False)
         # Input probing data (for frame count estimates)
         self._video_infos = []    # [{path, duration, native_fps, total_frames}]
         self._rescan_infos = []   # [{path, total_frames}]
@@ -795,77 +906,96 @@ class SfMApp(ctk.CTk):
             self.seg_map.set("COLMAP")
             self.seg_map.configure(state="disabled")
 
-        # --- OCIO Color Management ---
-        # Only show if PyOpenColorIO is installed
-        if self.has_ocio_lib:
-            card_ocio = SectionCard(main_scroll, "Color Management (OCIO)", icon="🎨")
-            card_ocio.pack(fill="x", pady=(0, 10))
+        # --- Color Management (Source / Destination) ---
+        card_color = SectionCard(main_scroll, "Color Management", icon="🎨")
+        card_color.pack(fill="x", pady=(0, 10))
 
-            # Info tooltip for OCIO
-            ocio_tip = InfoTooltip(card_ocio.content,
-                "Apple Log (Native) natively decodes Apple ProRes Log\n"
-                "from iPhone 15/16 Pro to ACEScg (Scene Linear) in 16-bit,\n"
-                "without requiring any external `.ocio` configuration file.\n\n"
-                "OCIO color space conversion uses OpenImageIO to apply\n"
-                "your custom `.ocio` configs before SfM.\n\n"
-                "16-bit output is automatically enabled when using Apple Log\n"
-                "or converting to linear colorspaces (ACEScg, Linear, scene-linear).")
-            ocio_tip.pack(anchor="e", pady=(0, 4))
-            ocio_tip.pack_info_after(card_ocio.content)
+        # Info tooltip
+        color_tip = InfoTooltip(card_color.content,
+            "Convert extracted frames between color spaces.\n\n"
+            "Source: The color profile of the input video.\n"
+            "  • Auto-detect reads ffprobe metadata (recommended)\n"
+            "  • Manual override for known sources\n\n"
+            "Destination: Target color space for processing.\n"
+            "  • ACEScg: Industry-standard scene-linear (EXR + sRGB PNG)\n"
+            "  • Linear sRGB: Scene-linear Rec.709\n"
+            "  • sRGB (Tone Mapped): Display-ready with ACES filmic curve\n"
+            "  • Custom OCIO: Use your own .ocio config\n\n"
+            "16-bit output is automatic for linear/log sources.")
+        color_tip.pack(anchor="e", pady=(0, 4))
+        color_tip.pack_info_after(card_color.content)
 
-            ocio_toggle_row = ctk.CTkFrame(card_ocio.content, fg_color="transparent")
-            ocio_toggle_row.pack(fill="x", pady=(0, 8))
-            ctk.CTkLabel(ocio_toggle_row, text="Color Pipeline",
-                        text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).pack(side="left")
-            
-            pipeline_options = ["None", "Apple Log -> sRGB (ACES Tone Mapped)", "Apple Log -> ACEScg EXR + sRGB PNG"]
-            if self.has_ocio_lib:
-                pipeline_options.append("OCIO")
-                
-            self.seg_color = ctk.CTkSegmentedButton(ocio_toggle_row, values=pipeline_options, variable=self.color_pipeline,
-                                             selected_color=COLORS["accent_purple"],
-                                             selected_hover_color=COLORS["accent_purple"],
-                                             unselected_color=COLORS["bg_card"],
-                                             text_color=COLORS["text_primary"],
-                                             command=self._on_color_pipeline_change)
-            self.seg_color.pack(side="right")
+        # Enable toggle row
+        color_toggle_row = ctk.CTkFrame(card_color.content, fg_color="transparent")
+        color_toggle_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(color_toggle_row, text="Color Conversion",
+                    text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).pack(side="left")
+        ctk.CTkSwitch(color_toggle_row, variable=self.color_enabled, text="", width=46,
+                      progress_color=COLORS["accent_purple"],
+                      button_color=COLORS["text_primary"],
+                      command=self._on_color_enabled_change).pack(side="right")
 
-            self.ocio_options_frame = ctk.CTkFrame(card_ocio.content, fg_color="transparent")
-            self.ocio_options_frame.pack(fill="x")
-            
-            # Initially hide or show options based on the default value of the switch
-            if self.color_pipeline.get() != "OCIO":
-                self.ocio_options_frame.pack_forget()
+        # Source / Destination frame (shown when enabled)
+        self.color_sd_frame = ctk.CTkFrame(card_color.content, fg_color="transparent")
 
-            self._file_row(self.ocio_options_frame, "Config OCIO", self.ocio_path, self._browse_ocio, row=0)
-            
-            # Need to bind events instead of trace_add to prevent combobox from closing instantly
-            # find the entry widget in the row
-            for child in self.ocio_options_frame.winfo_children():
-                if isinstance(child, ctk.CTkEntry):
-                    child.bind("<FocusOut>", lambda e: self._update_ocio_dropdowns())
-                    child.bind("<Return>", lambda e: self._update_ocio_dropdowns())
+        sd_row = ctk.CTkFrame(self.color_sd_frame, fg_color="transparent")
+        sd_row.pack(fill="x", pady=(0, 4))
+        sd_row.columnconfigure(1, weight=1)
+        sd_row.columnconfigure(3, weight=1)
 
-            # Use buttons that open top-level windows instead of comboboxes
-            self.ocio_btn_in = ctk.CTkButton(self.ocio_options_frame, textvariable=self.ocio_in_cs,
-                                             fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
-                                             border_color=COLORS["border"], border_width=1,
-                                             text_color=COLORS["text_primary"], command=self._open_ocio_in_selection, width=180)
-            self.ocio_btn_out = ctk.CTkButton(self.ocio_options_frame, textvariable=self.ocio_out_cs,
-                                              fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
-                                              border_color=COLORS["border"], border_width=1,
-                                              text_color=COLORS["text_primary"], command=self._open_ocio_out_selection, width=180)
+        ctk.CTkLabel(sd_row, text="Source", text_color=COLORS["text_secondary"],
+                     font=ctk.CTkFont(size=13)).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        self.combo_color_source = ctk.CTkComboBox(
+            sd_row, variable=self.color_source, values=COLOR_SOURCES, state="readonly",
+            dropdown_fg_color=COLORS["bg_card"], button_color=COLORS["accent_blue"],
+            border_color=COLORS["border"], fg_color=COLORS["bg_dark"], width=200)
+        self.combo_color_source.grid(row=0, column=1, sticky="w", padx=(0, 20))
 
-            cs_row = ctk.CTkFrame(self.ocio_options_frame, fg_color="transparent")
-            cs_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-            
-            ctk.CTkLabel(cs_row, text="Input Space", text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).grid(row=0, column=0, padx=(0, 6), sticky="w")
-            self.ocio_btn_in.grid(row=0, column=1, sticky="w")
-            
-            ctk.CTkLabel(cs_row, text="Output Space", text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).grid(row=0, column=2, padx=(20, 6), sticky="w")
-            self.ocio_btn_out.grid(row=0, column=3, sticky="w")
+        ctk.CTkLabel(sd_row, text="Destination", text_color=COLORS["text_secondary"],
+                     font=ctk.CTkFont(size=13)).grid(row=0, column=2, padx=(0, 8), sticky="w")
+        self.combo_color_dest = ctk.CTkComboBox(
+            sd_row, variable=self.color_dest, values=COLOR_DESTINATIONS, state="readonly",
+            dropdown_fg_color=COLORS["bg_card"], button_color=COLORS["accent_blue"],
+            border_color=COLORS["border"], fg_color=COLORS["bg_dark"], width=220,
+            command=self._on_color_dest_change)
+        self.combo_color_dest.grid(row=0, column=3, sticky="w")
 
-            self._update_ocio_dropdowns()
+        # Detected profile label
+        self.detected_profile_label = ctk.CTkLabel(
+            self.color_sd_frame, text="", text_color=COLORS["accent_purple"],
+            font=ctk.CTkFont(size=12, weight="bold"))
+        self.detected_profile_label.pack(anchor="w", pady=(4, 0))
+
+        # OCIO options (hidden by default, shown only when dest = "Custom OCIO...")
+        self.ocio_options_frame = ctk.CTkFrame(self.color_sd_frame, fg_color="transparent")
+
+        self._file_row(self.ocio_options_frame, "Config OCIO", self.ocio_path, self._browse_ocio, row=0)
+
+        for child in self.ocio_options_frame.winfo_children():
+            if isinstance(child, ctk.CTkEntry):
+                child.bind("<FocusOut>", lambda e: self._update_ocio_dropdowns())
+                child.bind("<Return>", lambda e: self._update_ocio_dropdowns())
+
+        self.ocio_btn_in = ctk.CTkButton(self.ocio_options_frame, textvariable=self.ocio_in_cs,
+                                         fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+                                         border_color=COLORS["border"], border_width=1,
+                                         text_color=COLORS["text_primary"], command=self._open_ocio_in_selection, width=180)
+        self.ocio_btn_out = ctk.CTkButton(self.ocio_options_frame, textvariable=self.ocio_out_cs,
+                                          fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+                                          border_color=COLORS["border"], border_width=1,
+                                          text_color=COLORS["text_primary"], command=self._open_ocio_out_selection, width=180)
+
+        cs_row = ctk.CTkFrame(self.ocio_options_frame, fg_color="transparent")
+        cs_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        ctk.CTkLabel(cs_row, text="Input Space", text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).grid(row=0, column=0, padx=(0, 6), sticky="w")
+        self.ocio_btn_in.grid(row=0, column=1, sticky="w")
+
+        ctk.CTkLabel(cs_row, text="Output Space", text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).grid(row=0, column=2, padx=(20, 6), sticky="w")
+        self.ocio_btn_out.grid(row=0, column=3, sticky="w")
+
+        # Initially hidden (color disabled by default)
+        # self.color_sd_frame is packed/forgotten by _on_color_enabled_change
 
         # --- 4. Camera Model ---
         card_cam = SectionCard(main_scroll, "Camera Model (COLMAP)", icon="📷")
@@ -1144,12 +1274,34 @@ class SfMApp(ctk.CTk):
     # -------------------------------------------------------------------------
     #  CALLBACKS
     # -------------------------------------------------------------------------
-    def _on_color_pipeline_change(self, value):
-        if value == "OCIO":
+    def _on_color_enabled_change(self):
+        """Show/hide the Source/Destination panel based on the color toggle."""
+        if self.color_enabled.get():
+            self.color_sd_frame.pack(fill="x")
+            # Show OCIO options if needed
+            if self.color_dest.get() == "Custom OCIO...":
+                self.ocio_options_frame.pack(fill="x")
+                self._update_ocio_dropdowns()
+            # Update detected profile display
+            self._update_detected_color_display()
+        else:
+            self.color_sd_frame.pack_forget()
+
+    def _on_color_dest_change(self, value):
+        """Show/hide OCIO options based on destination selection."""
+        if value == "Custom OCIO...":
             self.ocio_options_frame.pack(fill="x")
             self._update_ocio_dropdowns()
         else:
             self.ocio_options_frame.pack_forget()
+
+    def _update_detected_color_display(self):
+        """Update the detected color profile label from probed data."""
+        profile = self.detected_color_profile.get()
+        if profile:
+            self.detected_profile_label.configure(text=f"🔍 Detected: {profile}")
+        else:
+            self.detected_profile_label.configure(text="")
 
     def _browse_ocio(self):
         path = self._native_file_dialog(mode="file", title="Select an OCIO configuration", file_filter="OCIO Config | *.ocio")
@@ -1158,7 +1310,7 @@ class SfMApp(ctk.CTk):
             self._update_ocio_dropdowns()
 
     def _update_ocio_dropdowns(self):
-        if not self.has_ocio_lib or self.color_pipeline.get() != "OCIO":
+        if not self.has_ocio_lib or self.color_dest.get() != "Custom OCIO...":
             return
         
         raw_path = self.ocio_path.get()
@@ -1319,6 +1471,11 @@ class SfMApp(ctk.CTk):
             self.video_path.set("")
             self.frame_estimate_var.set("")
             self.rescan_frame_estimate_label.configure(text="")
+            # Auto-preset color conversion for Rescan
+            self.color_enabled.set(True)
+            self.color_source.set("Auto-detect")
+            self.color_dest.set("ACEScg (EXR + sRGB PNG)")
+            self._on_color_enabled_change()
         else:
             self.input_label_var.set("Image Folder")
             self.fps_frame.grid_remove()
@@ -1333,7 +1490,9 @@ class SfMApp(ctk.CTk):
             self.frame_estimate_var.set("")
             
     def _probe_video_duration(self, video_path):
-        """Use ffprobe to get video duration and native FPS."""
+        """Use ffprobe to get video duration, native FPS, and color profile."""
+        info = {"path": str(video_path), "duration": 0, "native_fps": 30,
+                "total_frames": 0, "color_profile": ""}
         try:
             cmd = [
                 "ffprobe", "-v", "quiet", "-print_format", "json",
@@ -1343,22 +1502,26 @@ class SfMApp(ctk.CTk):
             if result.returncode == 0:
                 import json
                 data = json.loads(result.stdout)
-                duration = float(data.get("format", {}).get("duration", 0))
-                # Find video stream for native FPS
-                native_fps = 30.0
+                info["duration"] = float(data.get("format", {}).get("duration", 0))
+                # Find video stream for FPS + color info
                 for s in data.get("streams", []):
                     if s.get("codec_type") == "video":
                         r = s.get("r_frame_rate", "30/1")
                         parts = r.split("/")
                         if len(parts) == 2 and int(parts[1]) > 0:
-                            native_fps = int(parts[0]) / int(parts[1])
+                            info["native_fps"] = int(parts[0]) / int(parts[1])
+                        # Detect color profile
+                        c_prim = s.get("color_primaries", "").lower()
+                        c_trc = s.get("color_transfer", "").lower()
+                        key = (c_prim, c_trc)
+                        info["color_profile"] = _FFPROBE_TO_SOURCE.get(key, "")
+                        info["color_primaries"] = c_prim
+                        info["color_transfer"] = c_trc
                         break
-                total_frames = int(duration * native_fps)
-                return {"path": str(video_path), "duration": duration,
-                        "native_fps": native_fps, "total_frames": total_frames}
+                info["total_frames"] = int(info["duration"] * info["native_fps"])
         except Exception:
             pass
-        return {"path": str(video_path), "duration": 0, "native_fps": 30, "total_frames": 0}
+        return info
 
     def _probe_rescan_dataset(self, dataset_path):
         """Count frames in a Rescan dataset via odometry.csv and get native FPS."""
@@ -1484,10 +1647,21 @@ class SfMApp(ctk.CTk):
                 # Probe videos for frame estimates (in background)
                 def probe():
                     self._video_infos = [self._probe_video_duration(v) for v in self.video_paths]
-                    self.after(0, self._update_frame_estimate)
+                    # Detect color profile from first video
+                    detected = ""
+                    for info in self._video_infos:
+                        if info.get("color_profile"):
+                            detected = info["color_profile"]
+                            break
+                    def update_ui():
+                        self._update_frame_estimate()
+                        if detected:
+                            self.detected_color_profile.set(detected)
+                            self._update_detected_color_display()
+                    self.after(0, update_ui)
                 threading.Thread(target=probe, daemon=True).start()
         elif mode == "Rescan (LiDAR)":
-            dirs = self._native_file_dialog(mode="directory", title="Select one or more Rescan folders", multiple=True)
+            dirs = self._native_file_dialog(mode="directory", title="Select a Rescan folder (or parent folder containing multiple)", multiple=True)
             if not dirs:
                 return
             if isinstance(dirs, str):
@@ -1511,12 +1685,36 @@ class SfMApp(ctk.CTk):
                         n_depth = len(list(depth_dir.glob("*.png")))
                         self._log(f"   → {n_depth} depth maps available")
                 else:
-                    missing = []
-                    if not has_rgb: missing.append("rgb.mp4 or rgb.mov or rgb/ image folder")
-                    if not has_odom: missing.append("odometry.csv")
-                    if not has_cam: missing.append("camera_matrix.csv")
-                    self._log(f"⚠ {p.name}: invalid Rescan dataset.")
-                    self._log(f"   Missing files: {', '.join(missing)}")
+                    found_any = False
+                    try:
+                        for sub_p in p.iterdir():
+                            if sub_p.is_dir():
+                                s_has_rgb_video = (sub_p / "rgb.mp4").exists() or (sub_p / "rgb.mov").exists()
+                                s_has_rgb_seq = (sub_p / "rgb").is_dir() and any(
+                                    f.is_file() and f.suffix.lower() in {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+                                    for f in (sub_p / "rgb").iterdir()
+                                )
+                                s_has_rgb = s_has_rgb_video or s_has_rgb_seq
+                                s_has_odom = (sub_p / "odometry.csv").exists()
+                                s_has_cam = (sub_p / "camera_matrix.csv").exists()
+                                if s_has_rgb and s_has_odom and s_has_cam:
+                                    valid_dirs.append(sub_p)
+                                    self._log(f"📱 Rescan dataset detected inside parent: {sub_p.name}")
+                                    depth_dir = sub_p / "depth"
+                                    if depth_dir.exists():
+                                        n_depth = len(list(depth_dir.glob("*.png")))
+                                        self._log(f"   → {n_depth} depth maps available")
+                                    found_any = True
+                    except Exception:
+                        pass
+
+                    if not found_any:
+                        missing = []
+                        if not has_rgb: missing.append("rgb.mp4 or rgb.mov or rgb/ image folder")
+                        if not has_odom: missing.append("odometry.csv")
+                        if not has_cam: missing.append("camera_matrix.csv")
+                        self._log(f"⚠ {p.name}: invalid Rescan dataset or parent folder.")
+                        self._log(f"   Missing files: {', '.join(missing)}")
             if valid_dirs:
                 self.stray_paths = valid_dirs
                 self.video_paths = []
@@ -1528,10 +1726,25 @@ class SfMApp(ctk.CTk):
                 # Probe Rescan datasets for frame estimates (in background)
                 def probe_rescan():
                     infos = [self._probe_rescan_dataset(d) for d in valid_dirs]
+                    # Detect color profile from first dataset's video
+                    detected = ""
+                    for d in valid_dirs:
+                        for vname in ["rgb.mov", "rgb.mp4"]:
+                            vid = d / vname
+                            if vid.exists():
+                                vid_info = self._probe_video_duration(vid)
+                                if vid_info.get("color_profile"):
+                                    detected = vid_info["color_profile"]
+                                    break
+                        if detected:
+                            break
 
                     def update_ui():
                         self._rescan_infos = infos
                         self._update_frame_estimate()
+                        if detected:
+                            self.detected_color_profile.set(detected)
+                            self._update_detected_color_display()
 
                     self.after(0, update_ui)
 
@@ -1743,21 +1956,25 @@ class SfMApp(ctk.CTk):
         import tqdm as tqdm_module
 
         def apply_color_conversion(target_dir, tag_prefix, step_description, exr_out_dir=None):
-            _current_pipeline = self.color_pipeline.get()
-            if _current_pipeline == "None":
+            if not self.color_enabled.get():
                 return
             
+            _source = self.color_source.get()
+            _dest = self.color_dest.get()
+
+            # Resolve "Auto-detect" to the detected profile
+            if _source == "Auto-detect":
+                _source = self.detected_color_profile.get()
+                if not _source:
+                    _source = "Linear BT.2020"  # Safe default for ReScan
+                    self._log_tagged(tag_prefix, "       ⚠ No color profile detected, assuming Linear BT.2020")
+
             self._check_cancelled()
             self._log_tagged(tag_prefix, step_description)
+            self._log_tagged(tag_prefix, f"       ↳ {_source} → {_dest}")
 
-            if HAS_OCIO:
-                try:
-                    oiio.attribute("opencl:enable", 1)
-                    oiio.attribute("use_opengl", 1)
-                except Exception:
-                    pass
-            
-            if _current_pipeline == "OCIO":
+            # Validate OCIO destination
+            if _dest == "Custom OCIO...":
                 cfg_path = self.ocio_path.get()
                 cs_in = self.ocio_in_cs.get()
                 cs_out = self.ocio_out_cs.get()
@@ -1765,11 +1982,11 @@ class SfMApp(ctk.CTk):
                     self._log(f"❌ OCIO ERROR: Colorspaces not defined.")
                     raise ValueError("OCIO colorspaces missing")
                 if not HAS_OCIO:
-                    raise ValueError("OCIO pipeline selected but OpenImageIO missing.")
-            elif _current_pipeline == "Apple Log -> sRGB (ACES Tone Mapped)":
-                self._log_tagged(tag_prefix, "       ↳ Native Apple ProRes Log to sRGB via ACES Filmic Tone Mapping (16-bit)")
-            elif _current_pipeline == "Apple Log -> ACEScg EXR + sRGB PNG":
-                self._log_tagged(tag_prefix, "       ↳ Apple Log to ACEScg 32-bit EXR (for CG) + sRGB Tone Mapped 16-bit PNG (for COLMAP)")
+                    raise ValueError("Custom OCIO destination selected but OpenImageIO not available.")
+            else:
+                cfg_path = None
+                cs_in = None
+                cs_out = None
 
             exts = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff")
             all_images = []
@@ -1782,10 +1999,6 @@ class SfMApp(ctk.CTk):
                 raise ValueError(f"No images found for color conversion in {target_dir}")
 
             total_color = len(all_images)
-            
-            cfg_path = self.ocio_path.get() if _current_pipeline == "OCIO" else None
-            cs_in = self.ocio_in_cs.get() if _current_pipeline == "OCIO" else None
-            cs_out = self.ocio_out_cs.get() if _current_pipeline == "OCIO" else None
 
             success_count = 0
             errors = []
@@ -1796,14 +2009,13 @@ class SfMApp(ctk.CTk):
 
             with tqdm_module.tqdm(total=total_color, desc="Color Conversion") as pbar:
                 from concurrent.futures import ProcessPoolExecutor, as_completed
-                # Pass data as strings/built-in types to avoid pickling issues
                 futures = []
                 with ProcessPoolExecutor(max_workers=threads) as executor:
                     for img_path in all_images:
                         futures.append(executor.submit(
                             _process_image_color_worker, 
                             str(img_path), 
-                            _current_pipeline, 
+                            _source, _dest,
                             cs_in, cs_out, cfg_path, exr_dir_str
                         ))
                     
@@ -1941,7 +2153,7 @@ class SfMApp(ctk.CTk):
                     self._log_tagged("[LiDAR]", f"{ds_tag}   ✓ {stray_result['n_images']} images, "
                                      f"{stray_result['n_points']:,} points LiDAR")
 
-                    apply_color_conversion(ds_images, "[CPU]", f"{ds_tag} [*/5] Applying Color Pipeline ({self.color_pipeline.get()})...", exr_out_dir=ds_models)
+                    apply_color_conversion(ds_images, "[CPU]", f"{ds_tag} [*/5] Applying Color Conversion ({self.color_source.get()} → {self.color_dest.get()})...", exr_out_dir=ds_models)
 
                     # ── Step 2: Features ──
                     self._check_cancelled()
@@ -2081,12 +2293,11 @@ class SfMApp(ctk.CTk):
                             self._log_tagged("[CPU]", f"{ds_tag}   → {_copied} EXR file(s) ready "
                                              "for color pipeline")
                             # Apply color pipeline to EXR files only (temp dir)
-                            _current_pipeline = self.color_pipeline.get()
-                            if _current_pipeline != "None":
+                            if self.color_enabled.get():
                                 apply_color_conversion(
                                     _tmpdir_path, "[CPU]",
-                                    f"{ds_tag}   EXR remapping: applying color pipeline "
-                                    f"({_current_pipeline})...",
+                                    f"{ds_tag}   EXR remapping: applying color conversion "
+                                    f"({self.color_source.get()} → {self.color_dest.get()})...",
                                 )
                             # Move converted EXR files to images/
                             for _exr_f in _tmpdir_path.glob("*.exr"):
@@ -2249,10 +2460,15 @@ class SfMApp(ctk.CTk):
                         pass
                     
                     accel_tag = "[GPU]" if use_cuda else "[CPU]"
-                    # Determine 16-bit mode: auto-detect from OCIO or force toggle
+                    # Determine 16-bit mode: auto-detect from color settings or force toggle
                     use_16bit = self.force_16bit.get()
-                    if not use_16bit and self.has_ocio_lib and self.use_ocio.get():
-                        use_16bit = _ocio_needs_16bit(self.ocio_out_cs.get())
+                    if not use_16bit and self.color_enabled.get():
+                        dest = self.color_dest.get()
+                        # Auto-enable 16-bit for destinations that need linear precision
+                        if dest in ("ACEScg (EXR + sRGB PNG)", "Linear sRGB"):
+                            use_16bit = True
+                        elif dest == "Custom OCIO..." and self.has_ocio_lib:
+                            use_16bit = _ocio_needs_16bit(self.ocio_out_cs.get())
                     
                     self._log_tagged(accel_tag, f"[1/5] Extracting {total_videos} video(s) at {self.fps_extract.get():.1f} FPS...")
                     if use_cuda:
@@ -2356,15 +2572,14 @@ class SfMApp(ctk.CTk):
                     total_imgs = len([f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
                     self._log_tagged(accel_tag, f"       ✓ Extraction complete — {total_imgs} images total")
 
-            # --- 1.5 COLOR PIPELINE CONVERSION ---
-            _current_pipeline = self.color_pipeline.get()
-            if _current_pipeline != "None":
+            # --- 1.5 COLOR CONVERSION ---
+            if self.color_enabled.get():
                 color_step_idx = 1
                 GUIProgressTqdm._step_index = color_step_idx
                 GUIProgressTqdm._step_name = "Color Conversion"
                 global_models_dir = sfm_dir / "models" / "0" / "0"
                 global_models_dir.mkdir(parents=True, exist_ok=True)
-                apply_color_conversion(images_dir, "[CPU]", f"[{color_step_idx+1}/{len(self.STEPS)}] Applying Color Pipeline ({_current_pipeline})...", exr_out_dir=global_models_dir)
+                apply_color_conversion(images_dir, "[CPU]", f"[{color_step_idx+1}/{len(self.STEPS)}] Applying Color Conversion ({self.color_source.get()} → {self.color_dest.get()})...", exr_out_dir=global_models_dir)
 
             if not is_stray_mode:
                 # ═══ SHARED PIPELINE (Video / Images modes only) ═══
