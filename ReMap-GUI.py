@@ -146,10 +146,9 @@ def _process_image_color_worker(img_path_str, pipeline, cs_in, cs_out, colorconf
 
     if pipeline == "OCIO" and HAS_OCIO:
         try:
-            colorconfig = oiio.ColorConfig(colorconfig_path) if colorconfig_path else None
             buf = oiio.ImageBuf(str(img_path))
             if not buf.has_error:
-                res = oiio.ImageBufAlgo.colorconvert(buf, buf, cs_in, cs_out, colorconfig=colorconfig)
+                res = oiio.ImageBufAlgo.colorconvert(buf, buf, cs_in, cs_out, colorconfig=colorconfig_path or "")
                 if res:
                     buf.write(str(img_path))
                     return True, None
