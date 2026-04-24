@@ -1,10 +1,13 @@
 import type { CameraPose, JobLogEntry, JobStatus, ProcessingSettings, SettingsSchema } from './types'
 
 export class RemapApi {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly apiKey: string,
-  ) {}
+  private readonly baseUrl: string
+  private readonly apiKey: string
+
+  constructor(baseUrl: string, apiKey: string) {
+    this.baseUrl = baseUrl
+    this.apiKey = apiKey
+  }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
