@@ -110,6 +110,35 @@ launch.bat
 
 ---
 
+## 🧪 New React Desktop Interface (Preview)
+
+In addition to the current Tkinter GUI, the repository now includes a **React + Electron desktop app** in:
+
+`/home/runner/work/ReMap/ReMap/remap-desktop`
+
+### Run in development
+
+```bash
+cd /home/runner/work/ReMap/ReMap/remap-desktop
+npm install
+npm run dev:desktop
+```
+
+### Build desktop packages
+
+```bash
+cd /home/runner/work/ReMap/ReMap/remap-desktop
+npm run dist:desktop
+```
+
+The React desktop UI provides:
+- responsive multi-panel UX (Configuration, Processing, API Server, Jobs, Advanced)
+- embedded backend lifecycle control (start/stop local Python API server)
+- live process monitoring (status/progress/logs/metrics)
+- live camera visualizer from reconstruction exports
+
+---
+
 ## 🎨 Advanced Color Management (OCIO & EXR)
 
 ReMap uses **OpenImageIO** to process OpenColorIO workflows, essential for flat/log footage.

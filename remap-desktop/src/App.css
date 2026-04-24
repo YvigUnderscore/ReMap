@@ -1,0 +1,267 @@
+.app-shell {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1rem;
+  color: #e2e8f0;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: clamp(1.3rem, 2.5vw, 2rem);
+}
+
+.topbar p {
+  margin: 0.25rem 0 0;
+  color: #94a3b8;
+}
+
+.status-dot {
+  font-size: 0.85rem;
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid #334155;
+  background: #111827;
+}
+
+.status-dot.ok { border-color: #059669; color: #6ee7b7; }
+.status-dot.warn { border-color: #d97706; color: #fbbf24; }
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.tab {
+  background: #1e293b;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #312e81;
+  border-color: #6366f1;
+  color: #e0e7ff;
+}
+
+.notice-wrap {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.notice {
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.9rem;
+}
+.notice.success { background: #052e16; border: 1px solid #14532d; color: #86efac; }
+.notice.error { background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5; }
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  padding: 0.9rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.card.full {
+  grid-column: 1 / -1;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.card h3 {
+  margin: 0.2rem 0 0;
+  font-size: 0.92rem;
+  color: #cbd5e1;
+}
+
+label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: #94a3b8;
+}
+
+input,
+select,
+button {
+  background: #020617;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.9rem;
+}
+
+button {
+  cursor: pointer;
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+
+button.danger {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.row.between {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.row input {
+  min-width: 240px;
+  flex: 1;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.toggle input {
+  width: auto;
+  accent-color: #6366f1;
+}
+
+.progress-wrap {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.progress {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.progress-inner {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #7c3aed);
+}
+
+.progress-label,
+.progress-meta,
+.muted {
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.metrics > div {
+  border-radius: 10px;
+  border: 1px solid #334155;
+  padding: 0.5rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.metrics strong {
+  font-size: 1rem;
+}
+
+.metrics span {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.viewer-wrap {
+  height: 260px;
+  border-radius: 12px;
+  border: 1px solid #334155;
+  overflow: hidden;
+}
+
+.empty {
+  color: #94a3b8;
+  background: #020617;
+  border: 1px dashed #334155;
+  border-radius: 12px;
+  padding: 0.8rem;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.77rem;
+  line-height: 1.35;
+  max-height: 280px;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid #1e293b;
+  background: #020617;
+  padding: 0.7rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid #1e293b;
+  font-size: 0.82rem;
+}
+
+td.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+@media (max-width: 1080px) {
+  .grid.two { grid-template-columns: 1fr; }
+  .card.full { grid-column: auto; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

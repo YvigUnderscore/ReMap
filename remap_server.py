@@ -66,6 +66,35 @@ SUPPORTED_COLORSPACES: dict[str, str] = {
     "raw":         "Raw",
 }
 
+SETTINGS_SCHEMA = {
+    "input_modes": ["Video (.mp4, .mov)", "Image Folder", "Rescan (LiDAR)"],
+    "defaults": {
+        "fps": 4.0,
+        "feature_type": "superpoint_aachen",
+        "matcher_type": "superpoint+lightglue",
+        "max_keypoints": 4096,
+        "camera_model": "OPENCV",
+        "mapper_type": "COLMAP",
+        "stray_approach": "full_sfm",
+        "pairing_mode": "sequential",
+        "num_threads": min(multiprocessing.cpu_count(), 16),
+        "stray_confidence": 2,
+        "stray_depth_subsample": 2,
+        "stray_gen_pointcloud": True,
+    },
+    "options": {
+        "feature_type": ["superpoint_aachen", "superpoint_max", "disk", "aliked-n16", "sift"],
+        "matcher_type": ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam"],
+        "camera_model": ["OPENCV", "PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"],
+        "mapper_type": ["COLMAP", "GLOMAP"],
+        "stray_approach": ["full_sfm", "known_poses"],
+        "pairing_mode": ["sequential", "exhaustive"],
+        "stray_confidence": [0, 1, 2],
+        "color_destinations": ["ACEScg (EXR + sRGB PNG)", "Linear sRGB", "sRGB (Tone Mapped)", "Custom OCIO..."],
+    },
+    "supported_colorspaces": sorted(SUPPORTED_COLORSPACES.keys()),
+}
+
 # ---------------------------------------------------------------------------
 #  Job store  (in-memory, thread-safe)
 # ---------------------------------------------------------------------------
@@ -84,6 +113,7 @@ def _new_job(dataset_dir: Path, settings: dict) -> dict:
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "dataset_dir": str(dataset_dir),
         "output_dir": str(JOBS_DIR / job_id / "output"),
+        "live_dir": str(JOBS_DIR / job_id / "live"),
         "settings": settings,
         "error": None,
         "log": [],
@@ -422,7 +452,9 @@ def _run_job(job_id: str):
 
     dataset_dir = Path(job["dataset_dir"])
     output_dir = Path(job["output_dir"])
+    live_dir = Path(job["live_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    live_dir.mkdir(parents=True, exist_ok=True)
     settings = job["settings"]
 
     try:
@@ -658,7 +690,7 @@ def _run_job(job_id: str):
                 camera_mode=pycolmap.CameraMode.AUTO,
                 camera_model=camera_model,
                 mapper_type=mapper_type,
-                shared_dir=None,
+                shared_dir=live_dir,
                 export_every=5,
                 cancel_check=cancel_check,
                 logger=job_logger,
@@ -866,6 +898,12 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
             "message": "Dataset uploaded successfully",
         }), 201
 
+    @app.route(f"/api/{API_VERSION}/settings/schema", methods=["GET"])
+    def settings_schema():
+        """Expose settings defaults and selectable values for desktop/web clients."""
+        _require_auth()
+        return jsonify(SETTINGS_SCHEMA)
+
     @app.route(f"/api/{API_VERSION}/process", methods=["POST"])
     def start_processing():
         """Start processing a previously uploaded dataset.
@@ -1043,6 +1081,31 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
         _append_log(job_id, "Job cancelled by user")
 
         return jsonify({"job_id": job_id, "status": "cancelled"})
+
+    @app.route(f"/api/{API_VERSION}/jobs/<job_id>/visualizer/cameras", methods=["GET"])
+    def visualizer_cameras(job_id):
+        """Return exported live camera poses for 3D visualization."""
+        _require_auth()
+        job = _get_job(job_id)
+        if job is None:
+            abort(404, description=f"Job '{job_id}' not found")
+        cam_path = Path(job["live_dir"]) / "cameras.json"
+        if not cam_path.exists():
+            abort(404, description="No live camera export available yet")
+        with open(cam_path, "r", encoding="utf-8") as f:
+            return jsonify({"job_id": job_id, "cameras": json.load(f)})
+
+    @app.route(f"/api/{API_VERSION}/jobs/<job_id>/visualizer/model", methods=["GET"])
+    def visualizer_model(job_id):
+        """Return the live PLY reconstruction if available."""
+        _require_auth()
+        job = _get_job(job_id)
+        if job is None:
+            abort(404, description=f"Job '{job_id}' not found")
+        ply_path = Path(job["live_dir"]) / "model.ply"
+        if not ply_path.exists():
+            abort(404, description="No live model export available yet")
+        return send_file(str(ply_path), mimetype="application/octet-stream", as_attachment=False)
 
     # ── Error handlers ──
     @app.errorhandler(400)

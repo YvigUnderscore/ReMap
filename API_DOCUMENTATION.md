@@ -11,10 +11,13 @@ Complete REST API reference for the **ReMap Server**, designed for integration w
 - [Authentication](#authentication)
 - [Endpoints](#endpoints)
   - [Health Check](#health-check)
+  - [Settings Schema](#settings-schema)
   - [Upload Dataset](#upload-dataset)
   - [Start Processing](#start-processing)
   - [Job Status](#job-status)
   - [Job Logs](#job-logs)
+  - [Live Visualizer Cameras](#live-visualizer-cameras)
+  - [Live Visualizer Model](#live-visualizer-model)
   - [Job Result (Download)](#job-result-download)
   - [List Jobs](#list-jobs)
   - [Cancel Job](#cancel-job)
@@ -185,6 +188,28 @@ Optional files: `depth/*.png` (LiDAR depth maps), `confidence/*.png`
 
 ---
 
+### Settings Schema
+
+Expose frontend-friendly defaults/options for UI generation.
+
+```
+GET /api/v1/settings/schema
+```
+
+**Authentication**: Required
+
+**Response** `200 OK`:
+```json
+{
+  "input_modes": ["Video (.mp4, .mov)", "Image Folder", "Rescan (LiDAR)"],
+  "defaults": { "fps": 4.0, "feature_type": "superpoint_aachen" },
+  "options": { "feature_type": ["superpoint_aachen", "disk"] },
+  "supported_colorspaces": ["acescg", "linear", "srgb"]
+}
+```
+
+---
+
 ### Start Processing
 
 Start the SfM pipeline on a previously uploaded dataset.
@@ -328,6 +353,46 @@ GET /api/v1/jobs/{job_id}/logs
   ]
 }
 ```
+
+---
+
+### Live Visualizer Cameras
+
+Retrieve live-exported camera poses for process visualization.
+
+```
+GET /api/v1/jobs/{job_id}/visualizer/cameras
+```
+
+**Authentication**: Required
+
+**Response** `200 OK`:
+```json
+{
+  "job_id": "f7e8d9c0b1a2",
+  "cameras": [
+    {
+      "image_id": 1,
+      "name": "000001.png",
+      "world_from_cam": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    }
+  ]
+}
+```
+
+---
+
+### Live Visualizer Model
+
+Download or stream the live PLY point cloud export.
+
+```
+GET /api/v1/jobs/{job_id}/visualizer/model
+```
+
+**Authentication**: Required
+
+**Response** `200 OK` with PLY content.
 
 ---
 
