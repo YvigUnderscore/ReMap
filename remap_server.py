@@ -59,7 +59,7 @@ _IMAGE_EXTS = {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 SUPPORTED_COLORSPACES: dict[str, str] = {
     "linear":      "Linear",
     "srgb":        "sRGB",
-    "acescg":      "ACEScg",
+    "acescg":      "ACES - ACEScg",
     "aces2065-1":  "ACES2065-1",
     "rec709":      "Rec. 709",
     "log":         "Log",
@@ -223,7 +223,38 @@ def _prefix_images_in_reconstruction(sfm_dir: Path, prefix: str,
             logger_fn(f"  ⚠ Could not update sparse model image paths: {exc}")
 
 
-def _process_exr_worker(img_path_str: str, to_cs: str, internal_cs: str):
+def _normalize_final_bundle_images_bin(models_final: Path, logger_fn=None) -> None:
+    """Normalize copied images.bin paths so they are relative to the final bundle root."""
+    bin_path = models_final / "images.bin"
+    images_dir = models_final / "images"
+    if not bin_path.exists() or not images_dir.exists():
+        return
+    try:
+        images = _read_images_bin(bin_path)
+        available = {p.name.lower(): p.name for p in images_dir.iterdir() if p.is_file()}
+        updated = 0
+        for img in images:
+            basename = Path(img["name"].replace("\\", "/")).name
+            stem = Path(basename).stem.lower()
+            final_name = basename
+            if basename.lower() not in available:
+                for ext in (".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+                    candidate = f"{stem}{ext}"
+                    if candidate in available:
+                        final_name = available[candidate]
+                        break
+            img["name"] = f"images/{final_name}"
+            updated += 1
+        if updated:
+            _write_images_bin(bin_path, images)
+            if logger_fn:
+                logger_fn(f"  → Final bundle images.bin normalized for {updated} image path(s)")
+    except Exception as exc:
+        if logger_fn:
+            logger_fn(f"  ⚠ Could not normalize final bundle image paths: {exc}")
+
+
+def _process_exr_worker(img_path_str: str, from_cs: str, to_cs: str):
     """
     Top-level worker for parallel EXR color conversion via ProcessPoolExecutor.
     """
@@ -241,7 +272,7 @@ def _process_exr_worker(img_path_str: str, to_cs: str, internal_cs: str):
         buf = oiio.ImageBuf(str(img_path))
         if buf.has_error:
             return False, f"Could not read {img_path.name} for colorspace conversion"
-        result = oiio.ImageBufAlgo.colorconvert(buf, internal_cs, to_cs)
+        result = oiio.ImageBufAlgo.colorconvert(buf, from_cs, to_cs)
         if result.has_error:
             return False, f"Colorspace conversion failed for {img_path.name}: {result.geterror()}"
         result.write(str(img_path))
@@ -276,7 +307,8 @@ def _convert_image_worker(img_path_str: str, from_space: str, to_space: str):
 
 
 def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
-                       output_colorspace: str | None, logger_fn=None, num_threads: int = 4) -> None:
+                       input_colorspace: str | None, output_colorspace: str | None,
+                       logger_fn=None, num_threads: int = 4) -> None:
     """Post-processing: replace intermediate PNGs with colorspace-converted EXR files.
 
     When the source dataset contained EXR images (``rgb/`` directory), SfM was
@@ -321,8 +353,9 @@ def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
 
     # 2. Apply output colorspace conversion to EXR files
     if output_colorspace:
+        from_cs = SUPPORTED_COLORSPACES.get(input_colorspace or "", _INTERNAL_COLORSPACE)
         to_cs = SUPPORTED_COLORSPACES[output_colorspace]
-        if to_cs != _INTERNAL_COLORSPACE:
+        if to_cs != from_cs:
             import concurrent.futures
             converted = 0
 
@@ -334,7 +367,7 @@ def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
                 for frame_idx, png_name in frame_to_filename.items():
                     exr_dst_name = png_name.removesuffix(".png") + ".exr"
                     exr_dst = images_dir / exr_dst_name
-                    fs.append(executor.submit(_process_exr_worker, str(exr_dst), to_cs, _INTERNAL_COLORSPACE))
+                    fs.append(executor.submit(_process_exr_worker, str(exr_dst), from_cs, to_cs))
                 
                 for future in concurrent.futures.as_completed(fs):
                     res, err = future.result()
@@ -345,7 +378,7 @@ def _remap_exr_sources(stray_result: dict, sfm_dir: Path, images_dir: Path,
 
             if logger_fn:
                 logger_fn(f"  → {converted} EXR file(s) converted "
-                          f"from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
+                          f"from '{from_cs}' to '{to_cs}'")
 
     # 3. Rename image entries in the sparse model (png → exr)
     _rename_images_in_reconstruction(sfm_dir, ".png", ".exr", logger_fn)
@@ -567,17 +600,21 @@ def _run_job(job_id: str):
             skip_pointcloud=not bool(settings.get("stray_gen_pointcloud", True)),
             use_cuda=True,
             image_prefix="",
+            sfm_source_space=SUPPORTED_COLORSPACES.get(input_colorspace or "", "Auto-detect"),
             logger=job_logger,
             cancel_check=cancel_check,
         )
         job_logger(f"  ✓ {stray_result['n_images']} images, {stray_result['n_points']:,} LiDAR points")
 
         # ── Optional: input colorspace conversion ──
-        if input_colorspace:
+        if input_colorspace and not stray_result.get("has_exr_source", False):
             from_cs = SUPPORTED_COLORSPACES[input_colorspace]
             job_logger(f"  Colorspace: converting extracted images from '{from_cs}' → '{_INTERNAL_COLORSPACE}'")
             n = _convert_images_colorspace(images_dir, from_cs, _INTERNAL_COLORSPACE, job_logger, num_threads=num_threads)
             job_logger(f"  ✓ {n} image(s) converted from '{from_cs}' to '{_INTERNAL_COLORSPACE}'")
+
+        elif input_colorspace and stray_result.get("has_exr_source", False):
+            job_logger("  Colorspace: keeping tone-mapped sRGB PNG proxies for SfM; source EXR conversion is deferred")
 
         # ── Step 2: Feature extraction ──
         _update_job(job_id, progress=30, current_step="Features")
@@ -667,17 +704,21 @@ def _run_job(job_id: str):
         job_logger("  ✓ Reconstruction complete")
 
         # ── Optional: output colorspace conversion ──
-        if output_colorspace:
+        if output_colorspace and not stray_result.get("has_exr_source", False):
             to_cs = SUPPORTED_COLORSPACES[output_colorspace]
             job_logger(f"  Colorspace: converting output images from '{_INTERNAL_COLORSPACE}' → '{to_cs}'")
             n = _convert_images_colorspace(images_dir, _INTERNAL_COLORSPACE, to_cs, job_logger, num_threads=num_threads)
             job_logger(f"  ✓ {n} image(s) converted from '{_INTERNAL_COLORSPACE}' to '{to_cs}'")
+
+        elif output_colorspace and stray_result.get("has_exr_source", False):
+            job_logger("  Colorspace: output EXR conversion will be applied during EXR remapping")
 
         # ── Optional: EXR remapping (when source was EXR image sequence) ──
         _remap_exr_sources(
             stray_result=stray_result,
             sfm_dir=sfm_dir,
             images_dir=images_dir,
+            input_colorspace=input_colorspace,
             output_colorspace=output_colorspace,
             logger_fn=job_logger,
             num_threads=num_threads,
@@ -693,10 +734,11 @@ def _run_job(job_id: str):
         # Copy the updated .bin files into models/0/0/ so that directory
         # contains the fully up-to-date reconstruction (EXR names + prefix),
         # overwriting any stale SfM output that may have been left there.
-        for bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
+        for bin_fname in ("cameras.bin", "images.bin", "points3D.bin", "frames.bin", "rigs.bin"):
             src_bin = sfm_dir / bin_fname
             if src_bin.exists():
                 shutil.copy2(str(src_bin), str(models_final / bin_fname))
+        _normalize_final_bundle_images_bin(models_final, job_logger)
         job_logger("  → Updated sparse .bin files copied to sparse/0/models/0/0/")
         # Clean up non-essential intermediate files and stale text-format
         # sparse model files (only binary .bin files are kept up-to-date by
@@ -713,7 +755,7 @@ def _run_job(job_id: str):
         # Remove stale SfM output left in models/0/ (GLOMAP copies, not moves)
         sfm_model0 = sfm_dir / "models" / "0"
         if sfm_model0.is_dir():
-            for stale in ("cameras.bin", "images.bin", "points3D.bin"):
+            for stale in ("cameras.bin", "images.bin", "points3D.bin", "frames.bin", "rigs.bin"):
                 sf = sfm_model0 / stale
                 if sf.exists():
                     try:

@@ -23,6 +23,10 @@ Thumbs.db
 # Build artifacts
 glomap_build/
 SuperGluePretrainedNetwork/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+backend_state/
 
 # Temp / test files
 untrunc/

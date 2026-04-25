@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from backend.color_conversion_worker import write_sfm_proxy_png
+
 # Supported image file extensions for pre-extracted image sequences
 _IMAGE_EXTS = {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
@@ -174,7 +176,7 @@ def _build_ffmpeg_cmd(video_path: Path, output_dir: Path, image_prefix: str,
     if vf:
         cmd.extend(["-vf", vf])
     
-    cmd.extend(["-vsync", "0"])
+    cmd.extend(["-vsync", "0", "-pix_fmt", "rgb48be"])
 
     cmd.extend([
         "-qscale:v", "2",
@@ -578,6 +580,7 @@ def convert_stray_to_colmap(
     skip_pointcloud: bool = False,
     use_cuda: bool = True,
     image_prefix: str = "",
+    sfm_source_space: str | None = None,
     logger=print,
     cancel_check=None,
 ):
@@ -594,6 +597,7 @@ def convert_stray_to_colmap(
         skip_pointcloud: Skip depth → point cloud generation
         use_cuda:     Try CUDA for FFmpeg
         image_prefix: Prefix for extracted image filenames (e.g. "ds01_") to avoid collisions
+        sfm_source_space: Source color profile for HDR/EXR SfM proxy PNGs.
         logger:       Logging callback
         cancel_check: Cancellation callback (raises on cancel)
     """
@@ -703,8 +707,7 @@ def convert_stray_to_colmap(
 
         has_exr = any(f.suffix.lower() == ".exr" for f in src_files)
         has_exr_source = has_exr
-        if has_exr:
-            import OpenImageIO as oiio  # noqa: PLC0415 — deferred to avoid hard dependency at module level
+        resolved_proxy_source = None
 
         copied = 0
         for frame_idx in selected_frames:
@@ -714,19 +717,14 @@ def convert_stray_to_colmap(
                     dst_name = f"{image_prefix}{frame_idx:06d}.png"
                     dst = images_dir / dst_name
                     if not dst.exists():
-                        buf = oiio.ImageBuf(str(src))
-                        if buf.has_error:
-                            logger(f"  ⚠ Could not read {src.name}, skipping")
-                            continue
-                        pixels = buf.get_pixels(oiio.FLOAT)
-                        pixels = np.clip(pixels[..., :3], 0.0, 1.0)
-                        h, w, c = pixels.shape
-                        out_spec = oiio.ImageSpec(w, h, c, oiio.UINT16)
-                        out_buf = oiio.ImageBuf(out_spec)
-                        out_buf.set_pixels(oiio.ROI(), (pixels * 65535).astype(np.uint16))
-                        out_buf.write(str(dst))
-                        if out_buf.has_error:
-                            logger(f"  ⚠ Could not write {dst.name}: {out_buf.geterror()}")
+                        try:
+                            resolved_proxy_source = write_sfm_proxy_png(
+                                src,
+                                dst,
+                                sfm_source_space or "Auto-detect",
+                            )
+                        except Exception as exc:
+                            logger(f"  ⚠ Could not build SfM PNG proxy for {src.name}: {exc}")
                             continue
                 else:
                     dst_name = f"{image_prefix}{frame_idx:06d}{src.suffix}"
@@ -738,6 +736,8 @@ def convert_stray_to_colmap(
 
         n_frames = copied
         logger(f"  → {n_frames} frames copiées depuis rgb/")
+        if has_exr and resolved_proxy_source:
+            logger(f"  → EXR → PNG SfM proxy: {resolved_proxy_source} → tone-mapped sRGB")
 
         if cancel_check:
             cancel_check()

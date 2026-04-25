@@ -108,6 +108,49 @@ def run_sfm_with_live_export(
     # --- Mapping ---
     models_path = sfm_dir / "models"
     models_path.mkdir(exist_ok=True, parents=True)
+    reconstruction_files = ("images.bin", "cameras.bin", "points3D.bin", "frames.bin", "rigs.bin")
+
+    if mapper_type.lower() == "glomap" and hasattr(pycolmap, "global_mapping"):
+        try:
+            logger("[GLOMAP] Using pycolmap global mapper (schema-compatible).")
+            options = pycolmap.GlobalPipelineOptions()
+            if num_threads:
+                thread_count = int(num_threads)
+                options.num_threads = thread_count
+                options.mapper.num_threads = thread_count
+                try:
+                    options.mapper.bundle_adjustment.ceres.solver_options.num_threads = thread_count
+                except Exception:
+                    pass
+
+            reconstructions = pycolmap.global_mapping(
+                database_path=str(database),
+                image_path=str(image_dir),
+                output_path=str(models_path),
+                options=options,
+            )
+            if len(reconstructions) == 0:
+                raise RuntimeError("Aucun modele global reconstruit !")
+
+            largest_index = max(reconstructions, key=lambda i: reconstructions[i].num_reg_images())
+            rec = reconstructions[largest_index]
+
+            if shared_dir:
+                _export_reconstruction_state(rec, shared_dir)
+
+            for filename in reconstruction_files:
+                src = models_path / str(largest_index) / filename
+                dst = sfm_dir / filename
+                if dst.exists():
+                    dst.unlink()
+                if src.exists():
+                    shutil.copy(str(src), str(dst))
+
+            return rec
+        except Exception as exc:
+            logger(f"[GLOMAP] Integrated global mapper failed: {exc}")
+            logger("[GLOMAP] Falling back to COLMAP incremental mapper.")
+            mapper_type = "colmap"
     
     # Check for GLOMAP availability
     use_glomap = (mapper_type.lower() == "glomap")
@@ -185,7 +228,7 @@ def run_sfm_with_live_export(
             _export_reconstruction_state(rec, shared_dir)
             
         # Copy to main sfm_dir
-        for filename in ["images.bin", "cameras.bin", "points3D.bin"]:
+        for filename in reconstruction_files:
             src = actual_output / filename
             dst = sfm_dir / filename
             if src.exists():
@@ -241,7 +284,7 @@ def run_sfm_with_live_export(
             _export_reconstruction_state(rec, shared_dir)
 
         # Move result files to sfm_dir
-        for filename in ["images.bin", "cameras.bin", "points3D.bin", "frames.bin", "rigs.bin"]:
+        for filename in reconstruction_files:
             src = models_path / str(largest_index) / filename
             dst = sfm_dir / filename
             if dst.exists():
