@@ -7,7 +7,7 @@ from typing import Any
 import secrets
 import shutil
 
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 
 
 def utc_now_iso() -> str:
@@ -103,6 +103,15 @@ class ProcessingJobRequest:
     server_port: int = 5000
     server_api_key: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     label: str = ""
+    skip_existing: bool = True
+    quality_sweep: bool = False
+    sweep_sample_frames: int = 80
+    exclude_blurry: bool = False
+    exclude_black: bool = False
+    blur_threshold: float = 75.0
+    black_threshold: float = 0.08
+    ram_limit_percent: int = 90
+    gpu_vram_limit_percent: int = 92
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "ProcessingJobRequest":
@@ -137,6 +146,15 @@ class ProcessingJobRequest:
             server_port=int(payload.get("server_port", default.server_port)),
             server_api_key=str(payload.get("server_api_key", default.server_api_key)).strip() or default.server_api_key,
             label=str(payload.get("label", default.label)).strip(),
+            skip_existing=_coerce_bool(payload.get("skip_existing"), default.skip_existing),
+            quality_sweep=_coerce_bool(payload.get("quality_sweep"), default.quality_sweep),
+            sweep_sample_frames=int(payload.get("sweep_sample_frames", default.sweep_sample_frames)),
+            exclude_blurry=_coerce_bool(payload.get("exclude_blurry"), default.exclude_blurry),
+            exclude_black=_coerce_bool(payload.get("exclude_black"), default.exclude_black),
+            blur_threshold=float(payload.get("blur_threshold", default.blur_threshold)),
+            black_threshold=float(payload.get("black_threshold", default.black_threshold)),
+            ram_limit_percent=int(payload.get("ram_limit_percent", default.ram_limit_percent)),
+            gpu_vram_limit_percent=int(payload.get("gpu_vram_limit_percent", default.gpu_vram_limit_percent)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -168,6 +186,7 @@ class JobSummary:
     error: str | None = None
     queue_position: int | None = None
     progress_note: str = ""
+    eta_seconds: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -192,6 +211,7 @@ class JobDetail(JobSummary):
             error=self.error,
             queue_position=self.queue_position,
             progress_note=self.progress_note,
+            eta_seconds=self.eta_seconds,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -233,6 +253,10 @@ class SystemCapabilities:
     openimageio_available: bool
     torch_available: bool
     cuda_available: bool
+    loma_available: bool
+    triton_available: bool
+    torch_device_name: str
+    torch_compute_capability: str
     python_version: str
     platform: str
     ocio_env: str
@@ -247,15 +271,36 @@ class AppSettings:
     theme: str = "graphite"
     defaults: ProcessingJobRequest = field(default_factory=ProcessingJobRequest)
     server: ServerConfig = field(default_factory=ServerConfig)
+    recent_inputs: list[str] = field(default_factory=list)
+    recent_outputs: list[str] = field(default_factory=list)
+    notifications_enabled: bool = True
+    system_notifications: bool = True
+    cache_enabled: bool = True
+    cache_max_size_gb: float = 25.0
+    ram_limit_percent: int = 90
+    gpu_vram_limit_percent: int = 92
+    blur_threshold: float = 75.0
+    black_threshold: float = 0.08
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "AppSettings":
         payload = payload or {}
+        default = cls()
         return cls(
             schema_version=int(payload.get("schema_version", 1)),
             theme=str(payload.get("theme", "graphite")).strip() or "graphite",
             defaults=ProcessingJobRequest.from_payload(payload.get("defaults")),
             server=ServerConfig.from_payload(payload.get("server")),
+            recent_inputs=_coerce_list(payload.get("recent_inputs", default.recent_inputs))[:20],
+            recent_outputs=_coerce_list(payload.get("recent_outputs", default.recent_outputs))[:20],
+            notifications_enabled=_coerce_bool(payload.get("notifications_enabled"), default.notifications_enabled),
+            system_notifications=_coerce_bool(payload.get("system_notifications"), default.system_notifications),
+            cache_enabled=_coerce_bool(payload.get("cache_enabled"), default.cache_enabled),
+            cache_max_size_gb=float(payload.get("cache_max_size_gb", default.cache_max_size_gb)),
+            ram_limit_percent=int(payload.get("ram_limit_percent", default.ram_limit_percent)),
+            gpu_vram_limit_percent=int(payload.get("gpu_vram_limit_percent", default.gpu_vram_limit_percent)),
+            blur_threshold=float(payload.get("blur_threshold", default.blur_threshold)),
+            black_threshold=float(payload.get("black_threshold", default.black_threshold)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -264,4 +309,14 @@ class AppSettings:
             "theme": self.theme,
             "defaults": self.defaults.to_dict(),
             "server": self.server.to_dict(),
+            "recent_inputs": list(self.recent_inputs),
+            "recent_outputs": list(self.recent_outputs),
+            "notifications_enabled": self.notifications_enabled,
+            "system_notifications": self.system_notifications,
+            "cache_enabled": self.cache_enabled,
+            "cache_max_size_gb": self.cache_max_size_gb,
+            "ram_limit_percent": self.ram_limit_percent,
+            "gpu_vram_limit_percent": self.gpu_vram_limit_percent,
+            "blur_threshold": self.blur_threshold,
+            "black_threshold": self.black_threshold,
         }

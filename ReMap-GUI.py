@@ -19,6 +19,7 @@ import numpy as np
 from PIL import Image
 from backend.color_conversion_worker import process_image_color_worker
 from backend.bundle_postprocess import normalize_final_bundle
+from backend.frame_filter import reject_low_quality_frames
 
 try:
     import OpenImageIO as oiio
@@ -200,6 +201,7 @@ def _gamut_convert(rgb_linear, src_primaries, dst_primaries):
 try:
     import torch
     from hloc import extract_features, match_features, reconstruction, pairs_from_exhaustive
+    from backend.loma_matcher import LoMaMatcher, is_loma_matcher, loma_feature_path, loma_matches_path
     import pycolmap
     from sfm_runner import run_sfm_with_live_export
     from stray_to_colmap import convert_stray_to_colmap
@@ -907,7 +909,7 @@ class SfMApp(ctk.CTk):
         grid.columnconfigure(2, minsize=120)
 
         features_list = ["superpoint_aachen", "superpoint_max", "disk", "aliked-n16", "sift"]
-        matchers_list = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam"]
+        matchers_list = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam", "loma_b", "loma_g"]
         pairing_list = ["Sequential (Video)", "Exhaustive (Small dataset < 200)"]
 
         self._combo_row(grid, "Features", self.feature_type, features_list, row=1, col=0)
@@ -1868,6 +1870,69 @@ class SfMApp(ctk.CTk):
         if self._cancelled:
             raise CancelledError("Processing cancelled by user")
 
+    def _filter_frame_quality(self, image_dir, tag="[CPU]"):
+        """Optionally move blurry/black frames out of the active image set."""
+        def _get_var(name, default):
+            value = getattr(self, name, None)
+            if value is None:
+                return default
+            try:
+                return value.get()
+            except Exception:
+                return default
+
+        reject_blurry = bool(_get_var("exclude_blurry", False))
+        reject_black = bool(_get_var("exclude_black", False))
+        if not (reject_blurry or reject_black):
+            return
+        result = reject_low_quality_frames(
+            image_dir,
+            reject_blurry=reject_blurry,
+            reject_black=reject_black,
+            blur_threshold=float(_get_var("blur_threshold", 75.0)),
+            black_threshold=float(_get_var("black_threshold", 0.08)),
+            logger=lambda msg: self._log_tagged(tag, f"       {msg}"),
+        )
+        if result.get("rejected"):
+            self._log_tagged(tag, f"       -> Quality filter moved {len(result['rejected'])} frame(s) to _rejected_frames")
+
+    def _apply_quality_sweep_sample(self, image_dir, tag="[CPU]"):
+        def _get_var(name, default):
+            value = getattr(self, name, None)
+            if value is None:
+                return default
+            try:
+                return value.get()
+            except Exception:
+                return default
+
+        if not bool(_get_var("quality_sweep", False)):
+            return
+        limit = int(_get_var("sweep_sample_frames", 80))
+        if limit <= 0:
+            return
+        directory = Path(image_dir)
+        images = sorted([
+            path for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr")
+        ])
+        if len(images) <= limit:
+            return
+        keep_indexes = set()
+        if limit == 1:
+            keep_indexes.add(len(images) // 2)
+        else:
+            for idx in range(limit):
+                keep_indexes.add(round(idx * (len(images) - 1) / (limit - 1)))
+        unused_dir = directory / "_sweep_unused_frames"
+        unused_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for idx, path in enumerate(images):
+            if idx not in keep_indexes:
+                shutil.move(str(path), unused_dir / path.name)
+                moved += 1
+        self._log_tagged(tag, f"       -> Quality sweep sampled {len(images) - moved}/{len(images)} frames")
+
     def _finish(self, success=True, cancelled=False):
         if cancelled:
             color = COLORS["warning"]
@@ -2168,6 +2233,7 @@ class SfMApp(ctk.CTk):
             images_dir = base_out / "images"
             outputs_dir = base_out / "hloc_outputs"
             sfm_dir = base_out / "sparse" / "0"
+
             if not is_stray_mode:
                 images_dir.mkdir(parents=True, exist_ok=True)
                 outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -2265,13 +2331,30 @@ class SfMApp(ctk.CTk):
                         )
 
                     # ── Step 2: Features ──
+                    self._filter_frame_quality(ds_images, "[CPU]")
+                    self._apply_quality_sweep_sample(ds_images, "[CPU]")
                     self._check_cancelled()
                     self._set_step(1)
                     device_str = "[GPU]" if torch.cuda.is_available() else "[CPU]"
                     gui_handler.set_tag(device_str)
+                    matcher_name = self.matcher_type.get()
+                    loma_pipeline = (
+                        LoMaMatcher(
+                            matcher_name,
+                            max_keypoints=int(self.max_keypoints.get()),
+                            logger=lambda msg, _t=ds_tag, _d=device_str: self._log_tagged(_d, f"{_t} {msg}"),
+                            cancel_check=self._check_cancelled,
+                        )
+                        if is_loma_matcher(matcher_name)
+                        else None
+                    )
 
-                    ds_features_out = ds_hloc / 'features.h5'
-                    if ds_features_out.exists():
+                    ds_features_out = loma_feature_path(ds_hloc, matcher_name) if loma_pipeline else ds_hloc / 'features.h5'
+                    if loma_pipeline is not None:
+                        self._log_tagged(device_str, f"{ds_tag} [2/5] LoMa feature cache - {matcher_name} (max {self.max_keypoints.get()})...")
+                        ds_features_path = loma_pipeline.extract_features(ds_images, ds_features_out)
+                        self._log_tagged(device_str, f"{ds_tag}   LoMa features ready")
+                    elif ds_features_out.exists():
                         self._log_tagged(device_str, f"{ds_tag} [2/5] Features skipped (already present)")
                         ds_features_path = ds_features_out
                     else:
@@ -2309,8 +2392,12 @@ class SfMApp(ctk.CTk):
                     self._check_cancelled()
                     self._set_step(3)
                     gui_handler.set_tag(device_str)
-                    ds_matches_out = ds_hloc / 'matches.h5'
-                    if ds_matches_out.exists():
+                    ds_matches_out = loma_matches_path(ds_hloc, matcher_name) if loma_pipeline else ds_hloc / 'matches.h5'
+                    if loma_pipeline is not None:
+                        self._log_tagged(device_str, f"{ds_tag} [4/5] Matching - {matcher_name}...")
+                        ds_matches_path = loma_pipeline.match_pairs(ds_pairs_path, ds_features_path, ds_matches_out)
+                        self._log_tagged(device_str, f"{ds_tag}   LoMa matching complete")
+                    elif ds_matches_out.exists():
                         self._log_tagged(device_str, f"{ds_tag} [4/5] Matching skipped (already present)")
                         ds_matches_path = ds_matches_out
                     else:
@@ -2737,15 +2824,33 @@ class SfMApp(ctk.CTk):
 
             if not is_stray_mode:
                 # ═══ SHARED PIPELINE (Video / Images modes only) ═══
+                self._filter_frame_quality(images_dir, "[CPU]")
+                self._apply_quality_sweep_sample(images_dir, "[CPU]")
+
                 # 2. FEATURES
                 self._check_cancelled()
                 self._set_step(1)
                 
                 device_str = "[GPU]" if torch.cuda.is_available() else "[CPU]"
                 gui_handler.set_tag(device_str)
-                
-                features_out = outputs_dir / 'features.h5'
-                if features_out.exists():
+                matcher_name = self.matcher_type.get()
+                loma_pipeline = (
+                    LoMaMatcher(
+                        matcher_name,
+                        max_keypoints=int(self.max_keypoints.get()),
+                        logger=lambda msg, _d=device_str: self._log_tagged(_d, msg),
+                        cancel_check=self._check_cancelled,
+                    )
+                    if is_loma_matcher(matcher_name)
+                    else None
+                )
+                 
+                features_out = loma_feature_path(outputs_dir, matcher_name) if loma_pipeline else outputs_dir / 'features.h5'
+                if loma_pipeline is not None:
+                    self._log_tagged(device_str, f"[2/5] LoMa feature cache - {matcher_name} (max {self.max_keypoints.get()})...")
+                    features_path = loma_pipeline.extract_features(images_dir, features_out)
+                    self._log_tagged(device_str, "       LoMa features ready")
+                elif features_out.exists():
                     self._log_tagged(device_str, f"[2/5] Features skipped (already present: {features_out.name})")
                     features_path = features_out
                 else:
@@ -2783,8 +2888,12 @@ class SfMApp(ctk.CTk):
                 self._check_cancelled()
                 self._set_step(3)
                 gui_handler.set_tag(device_str) # Re-use GPU/CPU tag
-                matches_out = outputs_dir / 'matches.h5'
-                if matches_out.exists():
+                matches_out = loma_matches_path(outputs_dir, matcher_name) if loma_pipeline else outputs_dir / 'matches.h5'
+                if loma_pipeline is not None:
+                    self._log_tagged(device_str, f"[4/5] Matching - {matcher_name}...")
+                    matches_path = loma_pipeline.match_pairs(pairs_path, features_path, matches_out)
+                    self._log_tagged(device_str, "       LoMa matching complete")
+                elif matches_out.exists():
                     self._log_tagged(device_str, f"[4/5] Matching skipped (already present: {matches_out.name})")
                     matches_path = matches_out
                 else:

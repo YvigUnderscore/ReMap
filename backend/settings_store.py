@@ -74,6 +74,23 @@ class SettingsStore:
                 merged_server = current.server.to_dict()
                 merged_server.update(payload["server"] or {})
                 current.server = ServerConfig.from_payload(merged_server)
+            for key in (
+                "recent_inputs",
+                "recent_outputs",
+                "notifications_enabled",
+                "system_notifications",
+                "cache_enabled",
+                "cache_max_size_gb",
+                "ram_limit_percent",
+                "gpu_vram_limit_percent",
+                "blur_threshold",
+                "black_threshold",
+            ):
+                if key in payload:
+                    merged = current.to_dict()
+                    merged[key] = payload[key]
+                    current = AppSettings.from_payload(merged)
+            self._settings = current
             self._save_unlocked(current)
             return AppSettings.from_payload(current.to_dict())
 

@@ -58,9 +58,9 @@ if !ERRORLEVEL! equ 0 (set "HAS_GLOMAP=1") else (set "HAS_GLOMAP=0")
 :: 6. Virtual Environment
 if exist ".venv\Scripts\activate.bat" (set "HAS_VENV=1") else (set "HAS_VENV=0")
 
-:: 7. Python Requirements (Approximate check via hloc)
+:: 7. Python Requirements (Approximate check via hloc, LoMa and psutil)
 if !HAS_VENV! equ 1 (
-    .venv\Scripts\python.exe -c "import hloc" >nul 2>&1
+    .venv\Scripts\python.exe -c "import hloc, loma, psutil" >nul 2>&1
     if !ERRORLEVEL! equ 0 (set "HAS_PIP_REQ=1") else (set "HAS_PIP_REQ=0")
 ) else (
     set "HAS_PIP_REQ=0"
@@ -375,6 +375,15 @@ if !ERRORLEVEL! neq 0 (
     echo WARNING: Some packages failed to install.
 ) else (
     echo Requirements installed successfully.
+)
+
+echo Installing LoMa metadata compatibility shim...
+python -m pip install --ignore-requires-python dataclasses==0.8
+
+echo Installing pinned LoMa from official repository ^(--no-deps; dependencies are pinned in requirements.txt^)...
+python -m pip install --no-deps --force-reinstall "git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch"
+if !ERRORLEVEL! neq 0 (
+    echo WARNING: LoMa failed to install. Check Git and network access, then rerun option 7.
 )
 pause
 goto :eof

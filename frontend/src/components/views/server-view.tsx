@@ -1,5 +1,6 @@
-import { FolderOpen, KeyRound, Play, Radio, RefreshCw, Square } from "lucide-react";
+import { Copy, FolderOpen, KeyRound, Play, QrCode, Radio, RefreshCw, Square } from "lucide-react";
 import { useEffect, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { desktop } from "../../lib/desktop";
 import type { ServerConfig, ServerState } from "../../lib/types";
 import { Button } from "../ui/button";
@@ -33,6 +34,8 @@ export function ServerView({
       setDraft((current) => (current ? { ...current, output_dir: picked } : current));
     }
   }
+  const connectBaseUrl = state?.connect_url ?? `http://127.0.0.1:${draft.port}`;
+  const rescanUrl = `remap://connect?baseUrl=${encodeURIComponent(connectBaseUrl)}&apiKey=${encodeURIComponent(draft.api_key)}`;
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(280px,0.8fr)_minmax(0,1.2fr)] xl:gap-6">
@@ -132,6 +135,41 @@ export function ServerView({
               <div className="text-sm text-slate-500">Reachable</div>
               <div className="mt-2 text-lg font-semibold">
                 {state?.health.reachable ? "Yes" : "No"}
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-start gap-3">
+            <div className="rounded-2xl bg-white/6 p-3 text-accent-cyan">
+              <QrCode size={18} />
+            </div>
+            <div>
+              <CardTitle>ReScan Quick Connect</CardTitle>
+              <CardDescription>
+                Scan from ReScan or copy the local URL and API key manually.
+              </CardDescription>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-[auto_1fr]">
+            <div className="rounded-2xl bg-white p-3">
+              <QRCodeSVG value={rescanUrl} size={156} />
+            </div>
+            <div className="space-y-3">
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                <div className="text-sm text-slate-500">Local URL</div>
+                <div className="mt-2 break-all text-sm text-slate-200">{connectBaseUrl}</div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={() => navigator.clipboard.writeText(connectBaseUrl)}>
+                  <Copy size={16} className="mr-2" />
+                  Copy URL
+                </Button>
+                <Button variant="secondary" onClick={() => navigator.clipboard.writeText(draft.api_key)}>
+                  <Copy size={16} className="mr-2" />
+                  Copy key
+                </Button>
               </div>
             </div>
           </div>

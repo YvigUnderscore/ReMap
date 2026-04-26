@@ -462,6 +462,7 @@ def _run_job(job_id: str):
         # ── Lazy imports (heavy ML / SfM libraries) ──
         import torch
         from hloc import extract_features, match_features, reconstruction, pairs_from_exhaustive
+        from backend.loma_matcher import LoMaMatcher, is_loma_matcher, loma_feature_path, loma_matches_path
         import pycolmap
         from sfm_runner import run_sfm_with_live_export
         from stray_to_colmap import convert_stray_to_colmap
@@ -493,6 +494,11 @@ def _run_job(job_id: str):
         color_pipeline = settings.get("color_pipeline", "None")
         input_colorspace = settings.get("input_colorspace")
         output_colorspace = settings.get("output_colorspace")
+        loma_pipeline = (
+            LoMaMatcher(matcher_type, max_keypoints=max_keypoints, logger=job_logger)
+            if is_loma_matcher(matcher_type)
+            else None
+        )
 
         # Map approach label
         if "known" in stray_approach.lower() or "arkit" in stray_approach.lower():
@@ -620,11 +626,17 @@ def _run_job(job_id: str):
         _update_job(job_id, progress=30, current_step="Features")
         job_logger(f"Step 2/5 — Feature extraction ({feature_type})")
 
-        conf_feature = extract_features.confs[feature_type]
-        conf_feature["model"]["max_keypoints"] = max_keypoints
-        features_path = extract_features.main(
-            conf_feature, images_dir, feature_path=hloc_dir / "features.h5"
-        )
+        if loma_pipeline is not None:
+            features_path = loma_pipeline.extract_features(
+                images_dir,
+                loma_feature_path(hloc_dir, matcher_type),
+            )
+        else:
+            conf_feature = extract_features.confs[feature_type]
+            conf_feature["model"]["max_keypoints"] = max_keypoints
+            features_path = extract_features.main(
+                conf_feature, images_dir, feature_path=hloc_dir / "features.h5"
+            )
         job_logger("  ✓ Features extracted")
 
         # ── Step 3: Pair generation ──
@@ -653,11 +665,18 @@ def _run_job(job_id: str):
         _update_job(job_id, progress=65, current_step="Matching")
         job_logger(f"Step 4/5 — Matching ({matcher_type})")
 
-        conf_match = match_features.confs[matcher_type]
-        matches_path = match_features.main(
-            conf_match, pairs_path, features=features_path,
-            matches=hloc_dir / "matches.h5",
-        )
+        if loma_pipeline is not None:
+            matches_path = loma_pipeline.match_pairs(
+                pairs_path,
+                features_path,
+                loma_matches_path(hloc_dir, matcher_type),
+            )
+        else:
+            conf_match = match_features.confs[matcher_type]
+            matches_path = match_features.main(
+                conf_match, pairs_path, features=features_path,
+                matches=hloc_dir / "matches.h5",
+            )
         job_logger("  ✓ Matching complete")
 
         # ── Step 5: SfM / Triangulation ──
@@ -1068,6 +1087,47 @@ def create_app(api_key: str | None = None, output_root: Path | None = None) -> F
             ]
 
         return jsonify({"jobs": jobs_summary})
+
+    @app.route(f"/api/{API_VERSION}/stats", methods=["GET"])
+    def api_stats():
+        """Return live usage, performance and hardware statistics."""
+        _require_auth()
+
+        from backend.analytics_service import build_analytics_payload
+        from backend.models import JobDetail, JobLogEvent
+
+        with _jobs_lock:
+            raw_jobs = [dict(job) for job in _jobs.values()]
+
+        analytics_jobs = []
+        for item in raw_jobs:
+            logs = [
+                JobLogEvent(
+                    id=index + 1,
+                    timestamp=str(event.get("time") or item.get("updated_at")),
+                    level="info",
+                    message=str(event.get("message") or ""),
+                )
+                for index, event in enumerate(item.get("log", []))
+            ]
+            analytics_jobs.append(
+                JobDetail(
+                    job_id=str(item.get("job_id") or ""),
+                    status=str(item.get("status") or ""),
+                    progress=int(item.get("progress") or 0),
+                    current_step=str(item.get("current_step") or ""),
+                    created_at=str(item.get("created_at") or ""),
+                    updated_at=str(item.get("updated_at") or ""),
+                    label=str(item.get("settings", {}).get("label") or item.get("job_id") or ""),
+                    output_path=str(item.get("output_dir") or ""),
+                    input_mode="rescan",
+                    error=item.get("error"),
+                    request=dict(item.get("settings") or {}),
+                    logs=logs,
+                )
+            )
+
+        return jsonify(build_analytics_payload(analytics_jobs))
 
     @app.route(f"/api/{API_VERSION}/jobs/<job_id>/cancel", methods=["POST"])
     def cancel_job(job_id):

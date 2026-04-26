@@ -1,8 +1,13 @@
 import type {
   AppSettings,
+  AnalyticsPayload,
   CapabilitiesPayload,
+  CacheStatus,
+  DependencyStatus,
+  EstimatePayload,
   JobArtifacts,
   JobDetail,
+  ReconstructionPreview,
   JobSummary,
   OptionsPayload,
   ProcessingJobRequest,
@@ -36,6 +41,13 @@ export const api = {
     }),
   getCapabilities: () =>
     request<CapabilitiesPayload>("/internal/v1/system/capabilities"),
+  getAnalytics: () => request<AnalyticsPayload>("/internal/v1/analytics"),
+  getDependencies: () => request<DependencyStatus>("/internal/v1/dependencies"),
+  runDependencyAction: (action: string) =>
+    request<DependencyStatus>("/internal/v1/dependencies/actions", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
   getOptions: (ocioPath?: string) =>
     request<OptionsPayload>(
       `/internal/v1/options${ocioPath ? `?ocioPath=${encodeURIComponent(ocioPath)}` : ""}`,
@@ -44,6 +56,11 @@ export const api = {
     request<ProbeResponse>("/internal/v1/probe", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  estimate: (payloads: Partial<ProcessingJobRequest>[]) =>
+    request<EstimatePayload>("/internal/v1/estimate", {
+      method: "POST",
+      body: JSON.stringify({ requests: payloads }),
     }),
   getJobs: async () => {
     const data = await request<{ jobs: JobSummary[] }>("/internal/v1/jobs");
@@ -55,6 +72,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  createJobsBatch: async (payloads: Partial<ProcessingJobRequest>[]) => {
+    const data = await request<{ jobs: JobDetail[] }>("/internal/v1/jobs/batch", {
+      method: "POST",
+      body: JSON.stringify({ requests: payloads }),
+    });
+    return data.jobs;
+  },
   cancelJob: (jobId: string) =>
     request<JobDetail>(`/internal/v1/jobs/${jobId}/cancel`, {
       method: "POST",
@@ -70,6 +94,13 @@ export const api = {
     }),
   getJobArtifacts: (jobId: string) =>
     request<JobArtifacts>(`/internal/v1/jobs/${jobId}/artifacts`),
+  getJobReconstruction: (jobId: string) =>
+    request<ReconstructionPreview>(`/internal/v1/jobs/${jobId}/reconstruction`),
+  getCache: () => request<CacheStatus>("/internal/v1/cache"),
+  clearCache: () =>
+    request<{ cleared: boolean; removed_entries: number; removed_size: number }>("/internal/v1/cache", {
+      method: "DELETE",
+    }),
   fileUrl: (path: string) =>
     `${BASE_URL}/internal/v1/files?path=${encodeURIComponent(path)}`,
   pauseJob: (jobId: string) =>

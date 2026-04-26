@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from flask import Flask, Response, jsonify, request, send_file
 
+from .analytics_service import build_analytics_payload
 from .capabilities import detect_capabilities_payload
+from .dependency_service import dependency_status, start_dependency_action
+from .estimate_service import estimate_payload
 from .job_service import JobService
 from .probe_service import build_option_payload, load_ocio_spaces, probe_inputs
 from .settings_store import SettingsStore
@@ -48,6 +51,25 @@ def create_internal_app(
     def system_capabilities():
         return jsonify(detect_capabilities_payload())
 
+    @app.route("/internal/v1/analytics", methods=["GET"])
+    def analytics():
+        return jsonify(build_analytics_payload(job_service.snapshot_jobs()))
+
+    @app.route("/internal/v1/dependencies", methods=["GET"])
+    def dependencies():
+        return jsonify(dependency_status())
+
+    @app.route("/internal/v1/dependencies/actions", methods=["POST"])
+    def dependency_actions():
+        payload = request.get_json(silent=True) or {}
+        action = str(payload.get("action", "")).strip()
+        try:
+            return jsonify(start_dependency_action(action)), 202
+        except ValueError as exc:
+            return jsonify({"error": "Invalid Request", "message": str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({"error": "Conflict", "message": str(exc), "status": dependency_status()}), 409
+
     @app.route("/internal/v1/options", methods=["GET"])
     def options():
         ocio_path = request.args.get("ocioPath")
@@ -65,6 +87,11 @@ def create_internal_app(
         target_fps = payload.get("fps_extract")
         return jsonify(probe_inputs(input_mode, input_paths, target_fps))
 
+    @app.route("/internal/v1/estimate", methods=["POST"])
+    def estimate():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(estimate_payload(payload, job_service.snapshot_jobs()))
+
     @app.route("/internal/v1/jobs", methods=["GET", "POST"])
     def jobs():
         if request.method == "GET":
@@ -75,6 +102,18 @@ def create_internal_app(
         except ValueError as exc:
             return jsonify({"error": "Invalid Request", "message": str(exc)}), 400
         return jsonify(job.to_dict()), 202
+
+    @app.route("/internal/v1/jobs/batch", methods=["POST"])
+    def jobs_batch():
+        payload = request.get_json(silent=True) or {}
+        requests = payload.get("requests", [])
+        if not isinstance(requests, list) or not requests:
+            return jsonify({"error": "Invalid Request", "message": "Missing requests list"}), 400
+        try:
+            created = job_service.create_jobs_batch([item for item in requests if isinstance(item, dict)])
+        except ValueError as exc:
+            return jsonify({"error": "Invalid Request", "message": str(exc)}), 400
+        return jsonify({"jobs": [job.to_dict() for job in created]}), 202
 
     @app.route("/internal/v1/jobs/queue", methods=["DELETE"])
     def clear_job_queue():
@@ -98,6 +137,13 @@ def create_internal_app(
     def job_artifacts(job_id: str):
         try:
             return jsonify(job_service.get_artifacts(job_id))
+        except KeyError:
+            return jsonify({"error": "Not Found", "message": f"Unknown job '{job_id}'"}), 404
+
+    @app.route("/internal/v1/jobs/<job_id>/reconstruction", methods=["GET"])
+    def job_reconstruction(job_id: str):
+        try:
+            return jsonify(job_service.get_reconstruction_preview(job_id))
         except KeyError:
             return jsonify({"error": "Not Found", "message": f"Unknown job '{job_id}'"}), 404
 
@@ -165,5 +211,11 @@ def create_internal_app(
         else:
             state = server_controller.get_state()
         return jsonify(state)
+
+    @app.route("/internal/v1/cache", methods=["GET", "DELETE"])
+    def cache():
+        if request.method == "DELETE":
+            return jsonify(job_service.clear_cache())
+        return jsonify(job_service.cache_status())
 
     return app

@@ -7,6 +7,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import json
+import socket
 from threading import RLock
 
 from .models import ServerConfig
@@ -36,6 +37,8 @@ class ServerController:
             "log_path": str(self._log_file),
             "health": health,
             "remote_jobs": jobs,
+            "local_ip": self.local_ip(),
+            "connect_url": f"http://{self.local_ip()}:{config.port}",
         }
 
     def update_config(self, payload: dict) -> dict:
@@ -112,3 +115,11 @@ class ServerController:
             return data.get("jobs", [])
         except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
             return []
+
+    def local_ip(self) -> str:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                return sock.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"

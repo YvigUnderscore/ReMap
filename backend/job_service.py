@@ -4,12 +4,25 @@ from collections import deque
 import json
 from pathlib import Path
 from threading import Condition, RLock, Thread
+import time
 from typing import Any, Iterator
 from uuid import uuid4
 
 from .bundle_postprocess import normalize_final_bundle
+from .estimate_service import estimate_request
 from .legacy_runner import LegacyGuiPipelineRunner
 from .models import JobDetail, JobLogEvent, ProcessingJobRequest, utc_now_iso
+from .pipeline_state import (
+    CheckpointStore,
+    cache_status,
+    clear_cache,
+    enforce_cache_limit,
+    request_fingerprint,
+    restore_cache,
+    store_cache,
+    touch_manifest,
+)
+from .reconstruction_preview import build_reconstruction_preview
 from .settings_store import STATE_DIR, SettingsStore
 
 
@@ -73,6 +86,7 @@ class JobService:
                     error=item.get("error"),
                     queue_position=item.get("queue_position"),
                     progress_note=str(item.get("progress_note") or ""),
+                    eta_seconds=item.get("eta_seconds"),
                     request=dict(item.get("request") or {}),
                     logs=logs,
                 )
@@ -115,6 +129,7 @@ class JobService:
             raise ValueError("Missing output_path")
         if not request.input_paths:
             raise ValueError("Missing input_paths")
+        self._remember_paths(request)
 
         job_id = uuid4().hex[:12]
         now = utc_now_iso()
@@ -130,6 +145,7 @@ class JobService:
             input_mode=request.input_mode,
             error=None,
             progress_note="Waiting for the queue",
+            eta_seconds=None,
             request=request.to_dict(),
             logs=[],
         )
@@ -140,6 +156,30 @@ class JobService:
             self._save_jobs_unlocked()
             self._condition.notify_all()
         return self.get_job(job_id)
+
+    def create_jobs_batch(self, payloads: list[dict[str, Any]]) -> list[JobDetail]:
+        created = []
+        for payload in payloads:
+            created.append(self.create_job(payload))
+        return created
+
+    def _remember_paths(self, request: ProcessingJobRequest) -> None:
+        try:
+            settings = self.settings_store.get()
+            recent_inputs = list(request.input_paths) + [
+                item for item in settings.recent_inputs if item not in request.input_paths
+            ]
+            recent_outputs = [request.output_path] + [
+                item for item in settings.recent_outputs if item != request.output_path
+            ]
+            self.settings_store.update(
+                {
+                    "recent_inputs": recent_inputs[:20],
+                    "recent_outputs": recent_outputs[:20],
+                }
+            )
+        except Exception:
+            pass
 
     def _queue_worker(self) -> None:
         while True:
@@ -176,6 +216,22 @@ class JobService:
             job.queue_position = queued_lookup.get(job_id) if job.status in {"queued", "processing", "paused"} else None
 
     def _run_job(self, job_id: str, request: ProcessingJobRequest) -> None:
+        started_at = time.monotonic()
+        settings = self.settings_store.get()
+        fingerprint = request_fingerprint(request)
+        checkpoint = CheckpointStore(Path(request.output_path), fingerprint, request)
+        estimate = estimate_request(request.to_dict(), self.snapshot_jobs())
+        cache_result = {"hit": False, "restored": []}
+        if not request.skip_existing:
+            self._clear_reusable_artifacts(Path(request.output_path))
+        if settings.cache_enabled:
+            cache_result = restore_cache(request, fingerprint, Path(request.output_path))
+        touch_manifest(
+            Path(request.output_path),
+            "fingerprint",
+            {"fingerprint": fingerprint, "cache": cache_result},
+        )
+        checkpoint.mark("prepare", "completed", detail="Fingerprint and cache preflight complete")
         self._update_job(
             job_id,
             status="processing",
@@ -184,36 +240,70 @@ class JobService:
             error=None,
             queue_position=1,
             progress_note="Starting pipeline",
+            eta_seconds=estimate.get("estimated_seconds"),
         )
         self._append_log(job_id, "info", "Legacy pipeline bridge started")
+        if cache_result.get("hit"):
+            self._append_log(
+                job_id,
+                "info",
+                f"Global cache hit: restored {', '.join(cache_result.get('restored', []))}",
+            )
+
+        last_checkpoint_step = {"value": "prepare"}
 
         def on_log(message: str) -> None:
             self._append_log(job_id, "info", message)
 
         def on_step(index: int, total: int, name: str) -> None:
             progress = min(95, max(1, int((index / max(total, 1)) * 100)))
-            self._update_job(job_id, current_step=name, progress=progress, progress_note="")
+            step_name = self._checkpoint_step_name(name, index)
+            previous = last_checkpoint_step.get("value")
+            if previous and previous != step_name:
+                checkpoint.mark(previous, "completed", detail=f"Advanced to {name}")
+            last_checkpoint_step["value"] = step_name
+            checkpoint.mark(step_name, "running", detail=name)
+            self._update_job(
+                job_id,
+                current_step=name,
+                progress=progress,
+                progress_note=self._format_eta_note("", started_at, progress, estimate),
+                eta_seconds=self._eta_seconds(started_at, progress, estimate),
+            )
 
         def on_detail(note: str, progress: int | None = None) -> None:
-            changes: dict[str, Any] = {"progress_note": note}
+            next_progress = progress
+            changes: dict[str, Any] = {
+                "progress_note": self._format_eta_note(note, started_at, next_progress, estimate),
+            }
             if progress is not None:
-                changes["progress"] = min(99, max(1, int(progress)))
+                next_progress = min(99, max(1, int(progress)))
+                changes["progress"] = next_progress
+                changes["eta_seconds"] = self._eta_seconds(started_at, next_progress, estimate)
             self._update_job(job_id, **changes)
 
         def on_finish(success: bool, cancelled: bool) -> None:
             if cancelled:
-                self._update_job(job_id, status="cancelled", current_step="Cancelled", progress=100, progress_note="")
+                checkpoint.mark("bundle", "cancelled", detail="Job cancelled")
+                self._update_job(job_id, status="cancelled", current_step="Cancelled", progress=100, progress_note="", eta_seconds=None)
                 self._append_log(job_id, "warning", "Job cancelled")
             elif success:
+                checkpoint.mark(last_checkpoint_step.get("value", "sfm"), "completed", detail="Pipeline step completed")
                 normalize_final_bundle(
                     request.output_path,
                     keep_srgb_png=request.keep_srgb_png and request.input_mode != "rescan",
                     use_acescg_exr=request.use_acescg_exr,
                 )
-                self._update_job(job_id, status="completed", current_step="Done", progress=100, progress_note="")
+                checkpoint.mark("bundle", "completed", detail="Final bundle normalized")
+                if settings.cache_enabled:
+                    stored = store_cache(request, fingerprint, Path(request.output_path))
+                    enforce_cache_limit(settings.cache_max_size_gb)
+                    self._append_log(job_id, "info", f"Global cache stored: {', '.join(stored.get('stored', [])) or 'nothing new'}")
+                self._update_job(job_id, status="completed", current_step="Done", progress=100, progress_note="", eta_seconds=None)
                 self._append_log(job_id, "info", "Job completed successfully")
             else:
-                self._update_job(job_id, status="failed", current_step="Error", progress=100, progress_note="")
+                checkpoint.mark("bundle", "failed", detail="Legacy runner returned failure")
+                self._update_job(job_id, status="failed", current_step="Error", progress=100, progress_note="", eta_seconds=None)
 
         runner = LegacyGuiPipelineRunner(
             request=request,
@@ -230,19 +320,70 @@ class JobService:
             with self._lock:
                 job = self._jobs.get(job_id)
                 if job and job.status == "processing":
+                    checkpoint.mark(last_checkpoint_step.get("value", "sfm"), "completed", detail="Pipeline step completed")
                     normalize_final_bundle(
                         request.output_path,
                         keep_srgb_png=request.keep_srgb_png and request.input_mode != "rescan",
                         use_acescg_exr=request.use_acescg_exr,
                     )
-                    self._update_job(job_id, status="completed", current_step="Done", progress=100, progress_note="")
+                    checkpoint.mark("bundle", "completed", detail="Final bundle normalized")
+                    if settings.cache_enabled:
+                        stored = store_cache(request, fingerprint, Path(request.output_path))
+                        enforce_cache_limit(settings.cache_max_size_gb)
+                        self._append_log(job_id, "info", f"Global cache stored: {', '.join(stored.get('stored', [])) or 'nothing new'}")
+                    self._update_job(job_id, status="completed", current_step="Done", progress=100, progress_note="", eta_seconds=None)
         except Exception as exc:
             self._append_log(job_id, "error", f"Job failed: {exc}")
-            self._update_job(job_id, status="failed", current_step="Error", progress=100, error=str(exc), progress_note="")
+            checkpoint.mark("bundle", "failed", detail=str(exc))
+            self._update_job(job_id, status="failed", current_step="Error", progress=100, error=str(exc), progress_note="", eta_seconds=None)
         finally:
             with self._lock:
                 self._runners.pop(job_id, None)
                 self._condition.notify_all()
+
+    def _checkpoint_step_name(self, name: str, index: int) -> str:
+        lower = name.lower()
+        if "color" in lower or "ocio" in lower:
+            return "color"
+        if "feature" in lower:
+            return "features"
+        if "pair" in lower:
+            return "pairs"
+        if "match" in lower:
+            return "matching"
+        if "sfm" in lower or "triang" in lower or "reconstruct" in lower:
+            return "sfm"
+        return ["prepare", "color", "features", "pairs", "matching", "sfm", "bundle"][min(index, 6)]
+
+    def _clear_reusable_artifacts(self, output_path: Path) -> None:
+        generated_dirs = [output_path / "images", output_path / "hloc_outputs"]
+        for directory in generated_dirs:
+            if directory.exists() and directory.is_dir():
+                for item in directory.iterdir():
+                    if item.is_file() and item.suffix.lower() in {".h5", ".txt", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr"}:
+                        try:
+                            item.unlink()
+                        except OSError:
+                            pass
+
+    def _eta_seconds(self, started_at: float, progress: int | None, estimate: dict[str, Any]) -> int | None:
+        if not progress or progress <= 1:
+            return int(estimate.get("estimated_seconds") or 0) or None
+        elapsed = time.monotonic() - started_at
+        projected = elapsed * (100 - progress) / max(progress, 1)
+        history_remaining = max(0.0, float(estimate.get("estimated_seconds") or 0) - elapsed)
+        if history_remaining:
+            projected = (projected + history_remaining) / 2
+        return int(max(0, projected))
+
+    def _format_eta_note(self, note: str, started_at: float, progress: int | None, estimate: dict[str, Any]) -> str:
+        eta = self._eta_seconds(started_at, progress, estimate)
+        if eta is None:
+            return note
+        minutes = eta // 60
+        seconds = eta % 60
+        eta_text = f"ETA {minutes}m {seconds:02d}s" if minutes else f"ETA {seconds}s"
+        return f"{note} - {eta_text}" if note else eta_text
 
     def _append_log(self, job_id: str, level: str, message: str) -> None:
         with self._lock:
@@ -279,6 +420,29 @@ class JobService:
             jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
             return [job.summary().to_dict() for job in jobs]
 
+    def snapshot_jobs(self) -> list[JobDetail]:
+        with self._lock:
+            return [
+                JobDetail(
+                    job_id=job.job_id,
+                    status=job.status,
+                    progress=job.progress,
+                    current_step=job.current_step,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                    label=job.label,
+                    output_path=job.output_path,
+                    input_mode=job.input_mode,
+                    error=job.error,
+                    queue_position=job.queue_position,
+                    progress_note=job.progress_note,
+                    eta_seconds=job.eta_seconds,
+                    request=dict(job.request),
+                    logs=list(job.logs),
+                )
+                for job in self._jobs.values()
+            ]
+
     def get_job(self, job_id: str) -> JobDetail:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -297,6 +461,7 @@ class JobService:
                 error=job.error,
                 queue_position=job.queue_position,
                 progress_note=job.progress_note,
+                eta_seconds=job.eta_seconds,
                 request=dict(job.request),
                 logs=list(job.logs),
             )
@@ -313,6 +478,7 @@ class JobService:
                 job.current_step = "Cancelled"
                 job.progress = 100
                 job.progress_note = ""
+                job.eta_seconds = None
                 job.updated_at = utc_now_iso()
                 self._recompute_queue_positions()
                 self._save_jobs_unlocked()
@@ -323,6 +489,7 @@ class JobService:
                 return self.get_job(job_id)
             job.current_step = "Cancelling"
             job.progress_note = "Cancellation requested"
+            job.eta_seconds = None
             job.updated_at = utc_now_iso()
             self._save_jobs_unlocked()
             self._condition.notify_all()
@@ -347,6 +514,7 @@ class JobService:
             else:
                 job.current_step = "Paused"
             job.progress_note = "Paused"
+            job.eta_seconds = None
             job.updated_at = utc_now_iso()
             self._recompute_queue_positions()
             self._save_jobs_unlocked()
@@ -371,6 +539,7 @@ class JobService:
                 job.status = "queued"
                 job.current_step = "Queued"
                 job.progress_note = "Waiting for the queue"
+            job.eta_seconds = None
             job.updated_at = utc_now_iso()
             self._recompute_queue_positions()
             self._save_jobs_unlocked()
@@ -468,6 +637,20 @@ class JobService:
             "reconstruction": reconstruction[:64],
             "latest_outputs": self._collect_files(output, IMAGE_EXTENSIONS | EXR_EXTENSIONS | RECONSTRUCTION_EXTENSIONS, limit=64, recursive=True),
         }
+
+    def get_reconstruction_preview(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            output_path = job.output_path
+        return build_reconstruction_preview(output_path)
+
+    def cache_status(self) -> dict[str, Any]:
+        return cache_status()
+
+    def clear_cache(self) -> dict[str, Any]:
+        return clear_cache()
 
     def _path_item(self, path: Path, kind: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         exists = path.exists()

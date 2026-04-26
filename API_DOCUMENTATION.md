@@ -17,6 +17,8 @@ Complete REST API reference for the **ReMap Server**, designed for integration w
   - [Job Logs](#job-logs)
   - [Job Result (Download)](#job-result-download)
   - [List Jobs](#list-jobs)
+  - [Server Stats](#server-stats)
+  - [Internal Dependency Manager](#internal-dependency-manager)
   - [Cancel Job](#cancel-job)
 - [Processing Settings](#processing-settings)
 - [Colorspace Values](#colorspace-values)
@@ -207,7 +209,7 @@ POST /api/v1/process
   "settings": {
     "fps": 4.0,
     "feature_type": "superpoint_aachen",
-    "matcher_type": "superpoint+lightglue",
+    "matcher_type": "loma_b",
     "max_keypoints": 4096,
     "camera_model": "OPENCV",
     "mapper_type": "COLMAP",
@@ -408,6 +410,115 @@ GET /api/v1/jobs
 
 ---
 
+### Server Stats
+
+Return live usage, performance and hardware telemetry for the current ReMap server session.
+
+```
+GET /api/v1/stats
+```
+
+**Authentication**: Required
+
+**Response** `200 OK`:
+```json
+{
+  "generated_at": "2026-04-26T12:00:00.000000+00:00",
+  "system": {
+    "cpu_percent": 41.2,
+    "ram_percent": 63.5,
+    "disk_percent": 72.1
+  },
+  "gpu": {
+    "available": true,
+    "name": "NVIDIA GeForce RTX 5080",
+    "capability": "sm_120",
+    "memory_used_mb": 9320,
+    "memory_total_mb": 16384,
+    "temperature_c": 67
+  },
+  "maxima": {
+    "gpu_temperature_c": 71,
+    "gpu_memory_used_mb": 10420
+  },
+  "throughput": {
+    "avg_feature_ms_per_frame": 44.8,
+    "avg_match_ms_per_pair": 19.6,
+    "features_observed": 624000,
+    "matches_observed": 148000
+  }
+}
+```
+
+The desktop backend exposes the same shape at `GET /internal/v1/analytics` for the React statistics page.
+
+---
+
+### Internal Dependency Manager
+
+The desktop backend exposes local maintenance endpoints for the Settings page. They are intended for the ReMap desktop UI, not the remote iOS API.
+
+```
+GET /internal/v1/dependencies
+```
+
+Returns the active Python executable, pinned requirement files, tracked package versions, model cache inventory, and the current background maintenance task.
+
+```json
+{
+  "python": ".venv/Scripts/python.exe",
+  "requirements": "requirements.txt",
+  "requirements_lock": "requirements.lock.txt",
+  "loma_locked_url": "git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch",
+  "packages": [
+    {
+      "name": "lightglue",
+      "installed": true,
+      "version": "0.0",
+      "direct_url": "{...}"
+    }
+  ],
+  "models": {
+    "torch_hub_dir": "...",
+    "torch_hub_checkpoints": [],
+    "superglue_weights": [],
+    "total_size_mb": 142.4
+  },
+  "task": {
+    "running": false,
+    "action": "",
+    "status": "idle",
+    "message": "",
+    "log": []
+  }
+}
+```
+
+```
+POST /internal/v1/dependencies/actions
+```
+
+Starts one background maintenance action. A second action returns `409 Conflict` while another task is running.
+
+```json
+{
+  "action": "install_packages"
+}
+```
+
+Supported actions:
+
+| Action | Description |
+|--------|-------------|
+| `install_packages` | Reinstall the pinned stable baseline from `requirements.txt`, the LoMa metadata shim, and the locked LoMa commit. |
+| `update_packages` | Upgrade toward the same pinned baseline. This keeps LightGlue, HLoc, PyTorch, and LoMa on the frozen revisions declared by ReMap. |
+| `download_core_models` | Warm the HLoc/LightGlue/SuperGlue model cache. |
+| `download_loma_b` | Warm the LoMa-B model cache. |
+| `download_loma_g` | Warm the LoMa-G model cache. |
+| `download_all_models` | Warm all core, LoMa-B, and LoMa-G model caches. |
+
+---
+
 ### Cancel Job
 
 Cancel a running or queued job.
@@ -443,7 +554,7 @@ All settings are optional. Defaults are used when omitted.
 |--------------------------|---------|--------------------------|------------------------------------------------------------------------------------------------------------|
 | `fps`                    | float   | `5.0`                    | Extraction FPS (frames per second from video)                                                              |
 | `feature_type`           | string  | `"superpoint_aachen"`    | Feature detector: `superpoint_aachen`,`superpoint_max`, `disk`, `aliked-n16`,`sift`                        |
-| `matcher_type`           | string  | `"superpoint+lightglue"` | Matcher: `superpoint+lightglue`, `superglue`, `disk+lightglue`,`adalam`                                    |
+| `matcher_type`           | string  | `"superpoint+lightglue"` | Matcher: `superpoint+lightglue`, `superglue`, `disk+lightglue`, `adalam`, `loma_b`, `loma_g`. LoMa-B is the faster default-sized LoMa model; LoMa-G is heavier and more accurate. |
 | `max_keypoints`          | int     | `8192`                   | Max keypoints per image                                                                                    |
 | `camera_model`           | string  | `"PINHOLE"`              | Camera model: `OPENCV`, `PINHOLE`, `SIMPLE_RADIAL`, `OPENCV_FISHEYE`                                       |
 | `mapper_type`            | string  | `"GLOMAP"`               | SfM engine: `COLMAP` or `GLOMAP`                                                                           |
@@ -462,6 +573,8 @@ All settings are optional. Defaults are used when omitted.
 | Outdoor scene            | 3-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
 | Small object / turntable | 2-10 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
 | Fast-moving scene        | 5-20 |`superpoint_aachen`| `superpoint+lightglue`| `full_sfm`   |
+| Difficult matching       | 2-8 |`superpoint_aachen`| `loma_b`              | `full_sfm`   |
+| Maximum LoMa accuracy    | 2-6 |`superpoint_aachen`| `loma_g`              | `full_sfm`   |
 
 ---
 

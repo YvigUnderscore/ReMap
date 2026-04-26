@@ -56,7 +56,7 @@ scan_system() {
 
     # 7. Pip requirements
     if [ $HAS_VENV -eq 1 ]; then
-        if sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/python3 -c 'import hloc'" 2>/dev/null; then
+        if sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/python3 -c 'import hloc, loma, psutil'" 2>/dev/null; then
             HAS_PIP_REQ=1
         fi
     fi
@@ -191,6 +191,9 @@ install_pip() {
     echo "Installing/Upgrading pip requirements..."
     sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --upgrade pip"
     sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install -r requirements.txt"
+    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --ignore-requires-python dataclasses==0.8"
+    echo "Installing pinned LoMa from official repository (--no-deps; dependencies are pinned in requirements.txt)..."
+    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --no-deps --force-reinstall 'git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch'"
     read -p "Press Enter to continue..."
 }
 

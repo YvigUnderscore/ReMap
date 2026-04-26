@@ -15,9 +15,33 @@ def detect_capabilities() -> SystemCapabilities:
 
         torch_available = True
         cuda_available = bool(torch.cuda.is_available())
+        if cuda_available:
+            index = torch.cuda.current_device()
+            torch_device_name = torch.cuda.get_device_name(index)
+            major, minor = torch.cuda.get_device_capability(index)
+            torch_compute_capability = f"sm_{major}{minor}"
+        else:
+            torch_device_name = ""
+            torch_compute_capability = ""
     except Exception:
         torch_available = False
         cuda_available = False
+        torch_device_name = ""
+        torch_compute_capability = ""
+
+    try:
+        import loma  # noqa: F401
+
+        loma_available = True
+    except Exception:
+        loma_available = False
+
+    try:
+        import triton  # noqa: F401
+
+        triton_available = True
+    except Exception:
+        triton_available = False
 
     try:
         import OpenImageIO  # noqa: F401
@@ -34,6 +58,10 @@ def detect_capabilities() -> SystemCapabilities:
         openimageio_available=openimageio_available,
         torch_available=torch_available,
         cuda_available=cuda_available,
+        loma_available=loma_available,
+        triton_available=triton_available,
+        torch_device_name=torch_device_name,
+        torch_compute_capability=torch_compute_capability,
         python_version=sys.version.split()[0],
         platform=platform.platform(),
         ocio_env=os.environ.get("OCIO", ""),

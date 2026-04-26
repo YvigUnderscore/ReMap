@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
   AppSettings,
@@ -11,6 +12,7 @@ import type {
   ServerState,
 } from "./lib/types";
 import { AppShell, type AppView } from "./components/app-shell";
+import { AnalyticsView } from "./components/views/analytics-view";
 import { JobsView } from "./components/views/jobs-view";
 import { NewJobWizard } from "./components/views/new-job-wizard";
 import { ServerView } from "./components/views/server-view";
@@ -45,6 +47,15 @@ const emptyDefaults: ProcessingJobRequest = {
   server_port: 5000,
   server_api_key: "",
   label: "",
+  skip_existing: true,
+  quality_sweep: false,
+  sweep_sample_frames: 80,
+  exclude_blurry: false,
+  exclude_black: false,
+  blur_threshold: 75,
+  black_threshold: 0.08,
+  ram_limit_percent: 90,
+  gpu_vram_limit_percent: 92,
 };
 
 const emptyOptions: OptionsPayload = {
@@ -70,6 +81,9 @@ export default function App() {
   const [serverState, setServerState] = useState<ServerState | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [appError, setAppError] = useState<string>("");
+  const [toasts, setToasts] = useState<Array<{ id: string; title: string; message: string; tone: string }>>([]);
+  const seenStatusesRef = useRef<Map<string, string>>(new Map());
+  const notificationsPrimedRef = useRef(false);
 
   async function loadInitial() {
     const jobsPromise = api.getJobs()
@@ -114,6 +128,67 @@ export default function App() {
     loadInitial().catch(console.error);
   }, []);
 
+  function pushToast(title: string, message: string, tone: string) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setToasts((current) => [...current, { id, title, message, tone }].slice(-5));
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 6500);
+  }
+
+  async function sendSystemNotification(title: string, body: string) {
+    if (!settings?.system_notifications) {
+      return;
+    }
+    try {
+      let permissionGranted = await isPermissionGranted();
+      if (!permissionGranted) {
+        const permission = await requestPermission();
+        permissionGranted = permission === "granted";
+      }
+      if (permissionGranted) {
+        sendNotification({ title, body });
+        return;
+      }
+    } catch {
+      // Fall through to browser notifications in the web preview.
+    }
+    if (typeof Notification === "undefined") {
+      return;
+    }
+    try {
+      const permission = Notification.permission === "default"
+        ? await Notification.requestPermission()
+        : Notification.permission;
+      if (permission === "granted") {
+        new Notification(title, { body });
+      }
+    } catch {
+      // Browser notifications are best-effort in the web preview.
+    }
+  }
+
+  useEffect(() => {
+    const next = new Map(seenStatusesRef.current);
+    const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
+    for (const job of jobs) {
+      const previous = seenStatusesRef.current.get(job.job_id);
+      next.set(job.job_id, job.status);
+      if (!notificationsPrimedRef.current || previous === job.status || !terminal.has(job.status)) {
+        continue;
+      }
+      if (!settings?.notifications_enabled) {
+        continue;
+      }
+      const title = job.status === "completed" ? "Job completed" : "Job stopped";
+      const message = `${job.label || job.job_id}: ${job.status}`;
+      pushToast(title, message, job.status === "completed" ? "success" : "danger");
+      sendSystemNotification(title, message).catch(console.error);
+    }
+    seenStatusesRef.current = next;
+    notificationsPrimedRef.current = true;
+  }, [jobs, settings?.notifications_enabled, settings?.system_notifications]);
+
   useEffect(() => {
     const poll = window.setInterval(() => {
       api.getJobs()
@@ -133,11 +208,7 @@ export default function App() {
     setSubmitting(true);
     setAppError("");
     try {
-      const created: JobDetail[] = [];
-      for (const payload of payloads) {
-        const job = await api.createJob(payload);
-        created.push(job);
-      }
+      const created = await api.createJobsBatch(payloads);
       const nextJobs = await api.getJobs();
       setJobs(nextJobs);
       if (created[0]) {
@@ -235,6 +306,7 @@ export default function App() {
           {view === "new-job" && (
             <NewJobWizard
               defaults={defaults}
+              settings={settings}
               options={options}
               capabilities={capabilities}
               onSubmit={createJobs}
@@ -255,6 +327,7 @@ export default function App() {
               onRequeueJob={requeueJob}
             />
           )}
+          {view === "analytics" && <AnalyticsView />}
           {view === "server" && (
             <ServerView
               state={serverState}
@@ -276,6 +349,21 @@ export default function App() {
           )}
         </motion.div>
       </AnimatePresence>
+      <div className="fixed bottom-5 right-5 z-50 grid w-[min(360px,calc(100vw-2rem))] gap-3">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`rounded-2xl border px-4 py-3 shadow-glow backdrop-blur-xl ${
+              toast.tone === "success"
+                ? "border-accent-emerald/30 bg-accent-emerald/15"
+                : "border-accent-red/30 bg-accent-red/15"
+            }`}
+          >
+            <div className="font-medium text-white">{toast.title}</div>
+            <div className="mt-1 text-sm text-slate-300">{toast.message}</div>
+          </div>
+        ))}
+      </div>
     </AppShell>
   );
 }

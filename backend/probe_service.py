@@ -41,7 +41,7 @@ COLOR_DESTINATIONS = [
 ]
 
 FEATURES = ["superpoint_aachen", "superpoint_max", "disk", "aliked-n16", "sift"]
-MATCHERS = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam"]
+MATCHERS = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam", "loma_b", "loma_g"]
 PAIRING = ["Sequential (Video)", "Exhaustive (Small dataset < 200)"]
 CAMERA_MODELS = ["OPENCV", "PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"]
 MAPPERS = ["COLMAP", "GLOMAP"]

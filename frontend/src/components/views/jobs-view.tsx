@@ -17,12 +17,15 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
+  ScanSearch,
+  CheckSquare,
   Square,
   Terminal,
   Trash2,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
 import { api } from "../../lib/api";
 import { desktop } from "../../lib/desktop";
 import type {
@@ -32,6 +35,7 @@ import type {
   JobLogEvent,
   JobSummary,
   ProcessingJobRequest,
+  ReconstructionPreview,
 } from "../../lib/types";
 import { Button } from "../ui/button";
 import { Card, CardDescription, CardTitle } from "../ui/card";
@@ -60,6 +64,15 @@ function formatBytes(value?: number | null) {
     unit += 1;
   }
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDuration(seconds?: number | null) {
+  if (!seconds) {
+    return "-";
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remaining = Math.round(seconds % 60);
+  return minutes ? `${minutes}m ${remaining.toString().padStart(2, "0")}s` : `${remaining}s`;
 }
 
 function statusTone(status: string) {
@@ -211,6 +224,95 @@ function FileList({ items, empty }: { items: JobArtifactItem[]; empty: string })
   );
 }
 
+function SparsePreview({ preview }: { preview: ReconstructionPreview | null }) {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount || !preview?.available || !preview.points.sample.length) {
+      return;
+    }
+    const width = Math.max(280, mount.clientWidth);
+    const height = 260;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05070b);
+    const camera = new THREE.PerspectiveCamera(55, width / height, 0.01, 10000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(width, height);
+    mount.innerHTML = "";
+    mount.appendChild(renderer.domElement);
+
+    const positions: number[] = [];
+    const colors: number[] = [];
+    for (const point of preview.points.sample) {
+      positions.push(point.xyz[0], point.xyz[1], point.xyz[2]);
+      colors.push(point.rgb[0] / 255, point.rgb[1] / 255, point.rgb[2] / 255);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+    const material = new THREE.PointsMaterial({ size: 0.025, vertexColors: true });
+    const points = new THREE.Points(geometry, material);
+    scene.add(points);
+    const sphere = geometry.boundingSphere;
+    const radius = sphere?.radius || 1;
+    const center = sphere?.center || new THREE.Vector3();
+    camera.position.set(center.x + radius * 1.4, center.y + radius * 1.1, center.z + radius * 2.2);
+    camera.lookAt(center);
+
+    let frame = 0;
+    const animate = () => {
+      frame = window.requestAnimationFrame(animate);
+      points.rotation.y += 0.003;
+      renderer.render(scene, camera);
+    };
+    animate();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      geometry.dispose();
+      material.dispose();
+      renderer.dispose();
+      mount.innerHTML = "";
+    };
+  }, [preview]);
+
+  if (!preview?.available) {
+    return (
+      <div className="flex min-h-64 items-center justify-center rounded-xl border border-white/8 bg-graphite-950/70 text-sm text-slate-500">
+        Sparse reconstruction preview is waiting for COLMAP outputs.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div ref={mountRef} className="overflow-hidden rounded-xl border border-white/8 bg-graphite-950/90" />
+      <div className="grid gap-3 md:grid-cols-4">
+        <div className="rounded-xl bg-white/[0.04] p-3">
+          <div className="text-xs text-slate-500">Points</div>
+          <div className="text-lg font-semibold text-white">{preview.stats.point_count.toLocaleString()}</div>
+        </div>
+        <div className="rounded-xl bg-white/[0.04] p-3">
+          <div className="text-xs text-slate-500">Images</div>
+          <div className="text-lg font-semibold text-white">{preview.stats.registered_images}</div>
+        </div>
+        <div className="rounded-xl bg-white/[0.04] p-3">
+          <div className="text-xs text-slate-500">Cameras</div>
+          <div className="text-lg font-semibold text-white">{preview.stats.camera_count}</div>
+        </div>
+        <div className="rounded-xl bg-white/[0.04] p-3">
+          <div className="text-xs text-slate-500">Mean error</div>
+          <div className="text-lg font-semibold text-white">
+            {preview.stats.mean_reprojection_error?.toFixed(3) ?? "-"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function JobsView({
   jobs,
   selectedJobId,
@@ -235,6 +337,8 @@ export function JobsView({
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [liveLogs, setLiveLogs] = useState<JobLogEvent[]>([]);
   const [artifacts, setArtifacts] = useState<JobArtifacts | null>(null);
+  const [reconstruction, setReconstruction] = useState<ReconstructionPreview | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showConsole, setShowConsole] = useState(false);
   const [showPayload, setShowPayload] = useState(false);
 
@@ -242,10 +346,15 @@ export function JobsView({
   const clearableCount = jobs.filter((job) => job.status !== "processing").length;
 
   useEffect(() => {
+    setSelectedIds((current) => new Set([...current].filter((id) => jobs.some((job) => job.job_id === id))));
+  }, [jobs]);
+
+  useEffect(() => {
     if (!selectedJobId) {
       setDetail(null);
       setLiveLogs([]);
       setArtifacts(null);
+      setReconstruction(null);
       return;
     }
 
@@ -263,15 +372,23 @@ export function JobsView({
         setArtifacts(result);
       }
     };
+    const loadReconstruction = async () => {
+      const result = await api.getJobReconstruction(selectedJobId);
+      if (!disposed) {
+        setReconstruction(result);
+      }
+    };
 
     loadDetail().catch(console.error);
     loadArtifacts().catch(console.error);
+    loadReconstruction().catch(console.error);
 
     const detailPoll = window.setInterval(() => {
       loadDetail().catch(console.error);
     }, 2500);
     const artifactPoll = window.setInterval(() => {
       loadArtifacts().catch(console.error);
+      loadReconstruction().catch(console.error);
     }, 5000);
 
     const source = new EventSource(api.jobLogsStreamUrl(selectedJobId));
@@ -301,6 +418,44 @@ export function JobsView({
     ...(artifacts?.input_paths.flatMap((item) => item.samples ?? []) ?? []),
     ...(artifacts?.frames ?? []),
   ].slice(0, 9);
+  const selectedJobs = jobs.filter((job) => selectedIds.has(job.job_id));
+  const completedJobs = jobs.filter((job) => job.status === "completed");
+
+  function toggleSelected(jobId: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) {
+        next.delete(jobId);
+      } else {
+        next.add(jobId);
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedOrCompleted() {
+    const target = selectedJobs.length ? selectedJobs : completedJobs;
+    for (const job of target) {
+      await onDeleteJob(job.job_id);
+    }
+    setSelectedIds(new Set());
+  }
+
+  async function requeueSelected() {
+    for (const job of selectedJobs) {
+      const detail = await api.getJob(job.job_id);
+      await onRequeueJob(detail.request);
+    }
+  }
+
+  async function openSelectedOutputs() {
+    const target = selectedJobs.length ? selectedJobs : liveDetail ? [liveDetail] : [];
+    for (const job of target) {
+      if (job.output_path) {
+        await desktop.revealPath(job.output_path);
+      }
+    }
+  }
 
   return (
     <div className="grid h-full min-w-0 gap-4 xl:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] xl:gap-6">
@@ -308,16 +463,37 @@ export function JobsView({
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <CardTitle>Queue</CardTitle>
-            <CardDescription>{jobs.length} jobs - {queuedCount} queued</CardDescription>
+            <CardDescription>
+              {jobs.length} jobs - {queuedCount} queued - {selectedIds.size} selected
+            </CardDescription>
           </div>
-          <div className="flex gap-2">
-            <Button variant="secondary" onClick={onClearQueuedJobs} disabled={!clearableCount} title="Clear queue">
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setSelectedIds(new Set(jobs.map((job) => job.job_id)))} disabled={!jobs.length} title="Select all">
+              <CheckSquare size={16} />
+            </Button>
+            <Button variant="secondary" onClick={openSelectedOutputs} disabled={!selectedJobs.length && !liveDetail} title="Open selected outputs">
+              <FolderOpen size={16} />
+            </Button>
+            <Button variant="warning" onClick={requeueSelected} disabled={!selectedJobs.length} title="Requeue selected">
+              <RotateCcw size={16} />
+            </Button>
+            <Button variant="danger" onClick={deleteSelectedOrCompleted} disabled={!selectedJobs.length && !completedJobs.length} title="Delete selected or completed jobs">
               <Trash2 size={16} />
             </Button>
             <Button variant="info" onClick={() => activeJob && onSelectJob(activeJob.job_id)} title="Refresh selection">
               <RefreshCw size={16} />
             </Button>
           </div>
+        </div>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={onClearQueuedJobs} disabled={!clearableCount} title="Clear non-processing jobs">
+            Clear non-processing
+          </Button>
+          {selectedIds.size ? (
+            <Button variant="ghost" onClick={() => setSelectedIds(new Set())}>
+              Clear selection
+            </Button>
+          ) : null}
         </div>
         <div className="space-y-3 overflow-auto pr-1">
           {jobs.map((job) => (
@@ -338,6 +514,16 @@ export function JobsView({
                 />
               ) : null}
               <div className="relative flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(job.job_id)}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    toggleSelected(job.job_id);
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                  className="mt-2 h-4 w-4 accent-accent-cyan"
+                />
                 <JobProcessIcon job={job} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-3">
@@ -418,7 +604,7 @@ export function JobsView({
               </div>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-5">
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
                 <div className="text-sm text-slate-500">Status</div>
                 <div className="mt-2 text-xl font-semibold capitalize">{liveDetail.status}</div>
@@ -437,6 +623,10 @@ export function JobsView({
                   {new Date(liveDetail.updated_at).toLocaleTimeString()}
                 </div>
               </div>
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                <div className="text-sm text-slate-500">ETA</div>
+                <div className="mt-2 text-xl font-semibold">{formatDuration(liveDetail.eta_seconds)}</div>
+              </div>
             </div>
 
             <div className="rounded-2xl border border-white/8 bg-graphite-950/60 p-4">
@@ -448,6 +638,19 @@ export function JobsView({
                 <span className="text-sm font-semibold text-accent-cyan">{liveDetail.progress}%</span>
               </div>
               <Progress value={liveDetail.progress} />
+            </div>
+
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
+                  <ScanSearch size={16} />
+                  Sparse preview
+                </div>
+                <Button variant="secondary" onClick={() => api.getJobReconstruction(liveDetail.job_id).then(setReconstruction).catch(console.error)}>
+                  <RefreshCw size={16} />
+                </Button>
+              </div>
+              <SparsePreview preview={reconstruction} />
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">

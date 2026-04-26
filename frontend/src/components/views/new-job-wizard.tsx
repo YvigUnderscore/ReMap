@@ -1,10 +1,25 @@
-import { ArrowRight, Check, FileJson, FolderOpen, Plus, Sparkle, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Check,
+  Clock3,
+  FileJson,
+  FolderOpen,
+  HardDrive,
+  History,
+  Plus,
+  Sparkle,
+  Trash2,
+  Wand2,
+} from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { api } from "../../lib/api";
 import { desktop } from "../../lib/desktop";
 import type {
   CapabilitiesPayload,
+  AppSettings,
+  EstimatePayload,
   OptionsPayload,
   ProbeItem,
   ProcessingJobRequest,
@@ -17,6 +32,7 @@ import { Input } from "../ui/input";
 const steps = ["Source", "Preparation", "Color", "Reconstruction", "Review & Run"] as const;
 const ACESCG_OCIO_SPACE = "ACES - ACEScg";
 const WIZARD_STORAGE_KEY = "remap:new-job-wizard";
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v"]);
 
 type WizardSnapshot = {
   step?: number;
@@ -29,6 +45,41 @@ function basename(path: string) {
 
 function slugify(value: string) {
   return value.replace(/\.[^.]+$/, "").replace(/[^\w-]+/g, "_");
+}
+
+function extname(path: string) {
+  const name = basename(path);
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index).toLowerCase() : "";
+}
+
+function formatBytes(value?: number | null) {
+  if (!value) {
+    return "-";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDuration(seconds?: number | null) {
+  if (!seconds) {
+    return "-";
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes) {
+    return `${minutes}m`;
+  }
+  return `${Math.max(1, Math.round(seconds))}s`;
 }
 
 function sliderMaxFromProbe(items: ProbeItem[], maxNativeFps: number) {
@@ -81,6 +132,7 @@ function estimateFrames(item: ProbeItem, fps: number, inputMode: ProcessingJobRe
 
 export function NewJobWizard({
   defaults,
+  settings,
   options,
   capabilities,
   onSubmit,
@@ -88,6 +140,7 @@ export function NewJobWizard({
   submitting,
 }: {
   defaults: ProcessingJobRequest;
+  settings: AppSettings | null;
   options: OptionsPayload;
   capabilities?: CapabilitiesPayload | null;
   onSubmit: (payloads: ProcessingJobRequest[]) => Promise<void>;
@@ -103,6 +156,9 @@ export function NewJobWizard({
   const [maxNativeFps, setMaxNativeFps] = useState(60);
   const [probeLoading, setProbeLoading] = useState(false);
   const [showRequestPayload, setShowRequestPayload] = useState(false);
+  const [estimate, setEstimate] = useState<EstimatePayload | null>(null);
+  const [estimateLoading, setEstimateLoading] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
 
   useEffect(() => {
     if (restoredSnapshotRef.current || draftDirtyRef.current) {
@@ -181,6 +237,17 @@ export function NewJobWizard({
     }
   }, [draft.color_dest, draft.ocio_out_cs, options.ocio_spaces]);
 
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    desktop.onFileDrop((paths) => {
+      setDropActive(false);
+      addDroppedPaths(paths);
+    }).then((unlisten) => {
+      cleanup = unlisten;
+    });
+    return () => cleanup?.();
+  }, [draft.input_mode]);
+
   function setDraftFromUser(updater: SetStateAction<ProcessingJobRequest>) {
     draftDirtyRef.current = true;
     setDraft(updater);
@@ -206,10 +273,34 @@ export function NewJobWizard({
     }));
   }
 
+  function addInputPaths(paths: string[], mode?: ProcessingJobRequest["input_mode"]) {
+    if (!paths.length) {
+      return;
+    }
+    setDraftFromUser((current) => ({
+      ...current,
+      input_mode: mode ?? current.input_mode,
+      input_paths: Array.from(new Set([...(mode && mode !== current.input_mode ? [] : current.input_paths), ...paths])),
+    }));
+  }
+
+  function addDroppedPaths(paths: string[]) {
+    const cleaned = paths.filter(Boolean);
+    if (!cleaned.length) {
+      return;
+    }
+    const videos = cleaned.filter((path) => VIDEO_EXTENSIONS.has(extname(path)));
+    if (videos.length === cleaned.length) {
+      addInputPaths(videos, "video");
+      return;
+    }
+    addInputPaths(cleaned, draft.input_mode === "video" ? "images" : draft.input_mode);
+  }
+
   async function pickVideos() {
     const picked = await desktop.pickVideoFiles();
     if (picked?.length) {
-      setDraftFromUser((current) => ({ ...current, input_paths: picked, input_mode: "video" }));
+      addInputPaths(picked, "video");
     }
   }
 
@@ -235,10 +326,7 @@ export function NewJobWizard({
     if (!picked.length) {
       return;
     }
-    setDraftFromUser((current) => ({
-      ...current,
-      input_paths: Array.from(new Set([...current.input_paths, ...picked])),
-    }));
+    addInputPaths(picked);
   }
 
   function removeInput(path: string) {
@@ -349,7 +437,7 @@ export function NewJobWizard({
   }
 
   const workerMax = capabilities?.cpu_count ?? 16;
-  const queuePreview = buildRequests();
+  const queuePreview = useMemo(() => buildRequests(), [displayProbeItems, draft]);
   const colorInputValue =
     draft.color_dest === "Custom OCIO..." && draft.ocio_in_cs
       ? `ocio:${draft.ocio_in_cs}`
@@ -363,6 +451,50 @@ export function NewJobWizard({
   const builtinColorOutputs = options.color_destinations.filter(
     (option) => option !== "Custom OCIO...",
   );
+
+  useEffect(() => {
+    if (!queuePreview.length || !draft.output_path) {
+      setEstimate(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setEstimateLoading(true);
+      api
+        .estimate(queuePreview)
+        .then(setEstimate)
+        .catch(() => setEstimate(null))
+        .finally(() => setEstimateLoading(false));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [queuePreview, draft.output_path]);
+
+  function buildQualitySweepRequests() {
+    const baseRequests = queuePreview.length ? queuePreview : buildRequests();
+    const presets = [
+      { suffix: "fast", matcher_type: "superpoint+lightglue", max_keypoints: 2048, fpsFactor: 0.5 },
+      { suffix: "balanced", matcher_type: draft.matcher_type, max_keypoints: Math.max(4096, draft.max_keypoints), fpsFactor: 0.75 },
+      { suffix: "quality", matcher_type: draft.matcher_type.includes("loma") ? draft.matcher_type : "loma_b", max_keypoints: Math.max(8192, draft.max_keypoints), fpsFactor: 1 },
+    ];
+    return baseRequests.flatMap((request) =>
+      presets.map((preset) => ({
+        ...request,
+        quality_sweep: true,
+        sweep_sample_frames: draft.sweep_sample_frames,
+        matcher_type: preset.matcher_type,
+        max_keypoints: preset.max_keypoints,
+        fps_extract: Math.max(0.5, Number((request.fps_extract * preset.fpsFactor).toFixed(1))),
+        label: `${request.label || basename(request.input_paths[0])} - ${preset.suffix}`,
+        output_path: `${request.output_path}_${preset.suffix}`,
+      })),
+    );
+  }
+
+  async function handleQualitySweep() {
+    await onSubmit(buildQualitySweepRequests());
+  }
+
+  const recentInputs = settings?.recent_inputs ?? [];
+  const recentOutputs = settings?.recent_outputs ?? [];
 
   return (
     <div className="space-y-6">
@@ -463,6 +595,36 @@ export function NewJobWizard({
                 </label>
               </div>
 
+              <div
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setDropActive(true);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setDropActive(true);
+                }}
+                onDragLeave={() => setDropActive(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDropActive(false);
+                  const paths = Array.from(event.dataTransfer.files)
+                    .map((file) => (file as File & { path?: string }).path || file.name)
+                    .filter(Boolean);
+                  addDroppedPaths(paths);
+                }}
+                className={`rounded-3xl border border-dashed px-5 py-8 text-center transition ${
+                  dropActive
+                    ? "border-accent-cyan/60 bg-accent-cyan/10"
+                    : "border-white/12 bg-white/[0.025]"
+                }`}
+              >
+                <div className="text-sm font-medium text-white">Drop videos or dataset folders here</div>
+                <div className="mt-1 text-xs text-slate-500">
+                  Tauri drops keep full paths; browser fallback uses available file names.
+                </div>
+              </div>
+
               <div className="flex flex-wrap gap-3">
                 {draft.input_mode === "video" ? (
                   <Button variant="info" onClick={pickVideos}>
@@ -518,6 +680,47 @@ export function NewJobWizard({
                   </Button>
                 </div>
               </label>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-300">
+                    <History size={16} />
+                    Recent inputs
+                  </div>
+                  <div className="space-y-2">
+                    {recentInputs.slice(0, 5).map((path) => (
+                      <button
+                        key={path}
+                        onClick={() => addInputPaths([path])}
+                        className="w-full truncate rounded-xl bg-graphite-950/70 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/8"
+                        title={path}
+                      >
+                        {basename(path)}
+                      </button>
+                    ))}
+                    {!recentInputs.length ? <div className="text-xs text-slate-500">No recent input yet.</div> : null}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-300">
+                    <History size={16} />
+                    Recent outputs
+                  </div>
+                  <div className="space-y-2">
+                    {recentOutputs.slice(0, 5).map((path) => (
+                      <button
+                        key={path}
+                        onClick={() => update("output_path", path)}
+                        className="w-full truncate rounded-xl bg-graphite-950/70 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/8"
+                        title={path}
+                      >
+                        {basename(path) || path}
+                      </button>
+                    ))}
+                    {!recentOutputs.length ? <div className="text-xs text-slate-500">No recent output yet.</div> : null}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -550,6 +753,55 @@ export function NewJobWizard({
                   </div>
                 </div>
               ) : null}
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="flex items-center justify-between gap-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-200">
+                  <span>
+                    <span className="block font-medium text-white">Reuse existing checkpoints/cache</span>
+                    <span className="mt-1 block text-xs text-slate-500">Skip extraction/features/matches when manifests are valid.</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.skip_existing}
+                    onChange={(event) => update("skip_existing", event.target.checked)}
+                    className="h-5 w-5 accent-accent-cyan"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-200">
+                  <span>
+                    <span className="block font-medium text-white">Reject blurry frames</span>
+                    <span className="mt-1 block text-xs text-slate-500">Moves rejected frames to `_rejected_frames`.</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.exclude_blurry}
+                    onChange={(event) => update("exclude_blurry", event.target.checked)}
+                    className="h-5 w-5 accent-accent-cyan"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-200">
+                  <span>
+                    <span className="block font-medium text-white">Reject black frames</span>
+                    <span className="mt-1 block text-xs text-slate-500">Useful for accidental lens covers or dead frames.</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.exclude_black}
+                    onChange={(event) => update("exclude_black", event.target.checked)}
+                    className="h-5 w-5 accent-accent-cyan"
+                  />
+                </label>
+                <label className="space-y-2 text-sm text-slate-300">
+                  Sweep sample frames
+                  <Input
+                    type="number"
+                    min={20}
+                    max={500}
+                    value={draft.sweep_sample_frames}
+                    onChange={(event) => update("sweep_sample_frames", Number(event.target.value))}
+                  />
+                </label>
+              </div>
 
               <div className="space-y-4">
                 {probeLoading && displayProbeItems.length ? (
@@ -873,24 +1125,43 @@ export function NewJobWizard({
                 </CardDescription>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-4">
                 <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
                   <div className="text-sm text-slate-400">Queued jobs</div>
                   <div className="mt-2 text-2xl font-semibold text-white">{queuePreview.length}</div>
                 </div>
                 <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-sm text-slate-400">Final image set</div>
+                  <div className="text-sm text-slate-400">Frames / pairs</div>
                   <div className="mt-2 text-lg font-semibold text-white">
-                    {draft.input_mode === "rescan" && !draft.use_acescg_exr
-                      ? "PNG only"
-                      : draft.color_dest}
+                    {estimateLoading ? "..." : `${estimate?.total_frames ?? 0} / ${estimate?.total_pairs ?? 0}`}
                   </div>
                 </div>
                 <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-sm text-slate-400">Workers</div>
-                  <div className="mt-2 text-lg font-semibold text-white">{draft.num_workers}</div>
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <HardDrive size={15} />
+                    Disk
+                  </div>
+                  <div className="mt-2 text-lg font-semibold text-white">{formatBytes(estimate?.total_disk_bytes)}</div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <Clock3 size={15} />
+                    Duration
+                  </div>
+                  <div className="mt-2 text-lg font-semibold text-white">{formatDuration(estimate?.total_seconds)}</div>
                 </div>
               </div>
+
+              {estimate?.warnings.length ? (
+                <div className="space-y-2 rounded-2xl border border-accent-amber/25 bg-accent-amber/10 p-4">
+                  {Array.from(new Set(estimate.warnings)).map((warning) => (
+                    <div key={warning} className="flex items-start gap-2 text-sm text-amber-100">
+                      <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                      <span>{warning}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="space-y-3">
                 {queuePreview.map((item) => (
@@ -907,10 +1178,16 @@ export function NewJobWizard({
                 ))}
               </div>
 
-              <Button variant="success" onClick={handleSubmit} disabled={submitting || !queuePreview.length}>
-                {submitting ? "Queueing..." : `Queue ${queuePreview.length} job(s)`}
-                <ArrowRight className="ml-2" size={16} />
-              </Button>
+              <div className="flex flex-wrap gap-3">
+                <Button variant="success" onClick={handleSubmit} disabled={submitting || !queuePreview.length}>
+                  {submitting ? "Queueing..." : `Queue ${queuePreview.length} job(s)`}
+                  <ArrowRight className="ml-2" size={16} />
+                </Button>
+                <Button variant="info" onClick={handleQualitySweep} disabled={submitting || !queuePreview.length}>
+                  <Wand2 className="mr-2" size={16} />
+                  Queue quality sweep
+                </Button>
+              </div>
             </div>
           )}
             </motion.div>
@@ -938,6 +1215,22 @@ export function NewJobWizard({
 {JSON.stringify(queuePreview, null, 2)}
             </pre>
           ) : null}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Estimate</div>
+              <div className="mt-2 text-sm text-slate-300">
+                {estimateLoading
+                  ? "Refreshing..."
+                  : `${estimate?.total_frames ?? 0} frames, ${formatDuration(estimate?.total_seconds)}`}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Confidence</div>
+              <div className="mt-2 text-sm capitalize text-slate-300">
+                {estimate?.estimates[0]?.confidence ?? "fallback"}
+              </div>
+            </div>
+          </div>
         </Card>
       </div>
 

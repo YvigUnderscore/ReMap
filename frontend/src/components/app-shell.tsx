@@ -1,11 +1,11 @@
 import { motion } from "framer-motion";
-import { Cog, FolderKanban, Radio, Sparkles } from "lucide-react";
+import { BarChart3, Cog, FolderKanban, Radio, Sparkles } from "lucide-react";
 import type { PropsWithChildren } from "react";
 import { Badge } from "./ui/badge";
 import type { JobSummary } from "../lib/types";
 import { cn } from "../lib/utils";
 
-export type AppView = "new-job" | "jobs" | "server" | "settings";
+export type AppView = "new-job" | "jobs" | "analytics" | "server" | "settings";
 
 const navItems: Array<{
   id: AppView;
@@ -16,6 +16,7 @@ const navItems: Array<{
 }> = [
   { id: "new-job", label: "New Job", caption: "Wizard-driven creation", icon: Sparkles, tone: "text-accent-cyan" },
   { id: "jobs", label: "Jobs", caption: "Live progress and logs", icon: FolderKanban, tone: "text-accent-emerald" },
+  { id: "analytics", label: "Analytics", caption: "Hardware and matching stats", icon: BarChart3, tone: "text-accent-blue" },
   { id: "server", label: "API Server", caption: "Remote ReScan bridge", icon: Radio, tone: "text-accent-blue" },
   { id: "settings", label: "Settings", caption: "Defaults and capabilities", icon: Cog, tone: "text-accent-amber" },
 ];
