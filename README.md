@@ -1,157 +1,275 @@
+<p align="center">
+  <img src="ReMap_logo.png" alt="ReMap" width="240">
+</p>
+
 # ReMap
 
-**ReMap** is a desktop pipeline to prepare your 3D captures for [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). It takes videos or LiDAR scans as input and produces a fully reconstructed COLMAP dataset, ready for training.
+ReMap is a desktop reconstruction pipeline for preparing captures for
+[3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
+It turns videos, image folders, or ReScan LiDAR captures into a COLMAP-style
+dataset that can be dropped into training tools such as Brush, Nerfstudio, or
+gsplat.
 
-It is the **desktop companion** to [**ReScan**](https://github.com/YvigUnderscore/ReScan), our iOS LiDAR capture app. Together, they form a complete end-to-end workflow: **capture on iPhone → process on desktop → train your Gaussian Splat. (trough another software)**
+ReMap also pairs with [ReScan](https://github.com/YvigUnderscore/ReScan), the
+iOS LiDAR capture app. ReScan is optional: the same desktop pipeline works with
+regular MP4/MOV footage and image sequences.
 
----
+<!-- Image slot: docs/images/remap-desktop-dashboard.png
+     Suggested: full-width screenshot of the new Tauri dashboard with the job wizard and queue visible. -->
 
-## 🔄 The ReMap + ReScan Workflow
+## Current Shape
 
-```text
-┌─────────────────────┐         ┌─────────────────────┐         ┌──────────────────────┐
-│      📱 ReScan      │   API   │      🖥️ ReMap      │  output │   🎯 3DGS Training   │
-│   (iOS Capture)     │ ──────► │  (Desktop Pipeline) │ ──────► │  (Nerfstudio, etc.)  │
-│                     │         │                     │         │                      │
-│ • LiDAR depth maps  │         │ • FFmpeg extraction │         │ • models/0/0/        │
-│ • RGB video (Log)   │         │ • OCIO color mgmt   │         │   cameras.bin        │
-│ • ARKit odometry    │         │ • HLoc features     │         │   images.bin         │
-│ • Camera intrinsics │         │ • COLMAP / GLOMAP   │         │   points3D.bin       │
-│                     │         │                     │         │   images/            │
-└─────────────────────┘         └─────────────────────┘         └──────────────────────┘
-```
+The project is in the middle of a clean desktop split:
 
-> **Don't have an iPhone with LiDAR?** No problem — ReMap also works with plain **MP4/MOV videos** from any camera or with **image folders**. ReScan is optional but unlocks the full LiDAR-guided workflow.
+| Layer | What it does |
+| --- | --- |
+| React + Tauri desktop shell | New main UI, file pickers, notifications, QR quick connect, job monitoring |
+| Local desktop backend | Flask service on `127.0.0.1:8765` for jobs, settings, cache, analytics, previews |
+| Legacy pipeline bridge | Reuses the proven `ReMap-GUI.py` processing logic without forcing the old UI |
+| ReScan API server | Authenticated `/api/v1` server on port `5000` for phone uploads and remote processing |
 
----
+The previous CustomTkinter interface is still available through
+`launch_legacy.bat` or `launch_legacy.sh`.
 
-## 🌐 Wireless Capture API
+## Highlights
 
-The most powerful way to use ReMap is by connecting it directly to **ReScan** over your local network using the built-in REST API (You can also port-forward to open-it remotely).
+- New desktop app built with React, Tauri, Tailwind, Framer Motion, and lucide icons.
+- Job queue with pause, resume, cancel, delete, requeue, live logs, ETA, and batch creation.
+- Drag-and-drop input selection for videos, image folders, and ReScan datasets.
+- Input probing with FFprobe/metadata detection, frame estimates, native FPS, and color profile hints.
+- Quality sweep presets for fast, balanced, and high-quality test runs.
+- Optional frame rejection for blurry or near-black frames.
+- Global pipeline cache for reusable HLoc/LoMa feature, pair, and match files.
+- Checkpoint manifests in `.remap/` for easier reruns and debugging.
+- Live analytics for CPU, RAM, disk, CUDA/GPU memory, temperature, matchers, features, and recent job throughput.
+- 3D sparse reconstruction preview in the Jobs view, powered by Three.js.
+- ReScan Quick Connect with local URL, API key copy buttons, and QR code.
+- Dependency and model manager for pinned packages, LoMa, LightGlue, SuperGlue, and cache warmup.
+- LoMa-B and LoMa-G matching support alongside LightGlue, SuperGlue, AdaLAM, DISK, ALIKED, SIFT, and SuperPoint.
+- ACEScg/EXR color pipeline with Apple Log, BT.2020, HLG, sRGB, Linear sRGB, and custom OCIO options.
 
-1. Start the API Server from the **ReMap GUI** or the headless server mode.
-2. An **API Key** is instantly generated, you can also customize it (before starting the server).
-3. Open **ReScan** on iOS, enter your computer/server IP and API Key.
-4. **Capture and send** datasets directly from your phone — ReMap will automatically unpack, process, and spit out the fully solved 3D model!
-
-> 📖 **Developers:** See the comprehensive [API Documentation](API_DOCUMENTATION.md) to integrate ReMap with your own HTTP clients, complete with Swift `URLSession` examples.
-
----
-
-## ✨ Features
-
-- **🌐 Live API Server**: Remote dataset upload and automated processing from the [ReScan](https://github.com/YvigUnderscore/ReScan) iOS app.
-- **🎨 Advanced EXR & Color Pipeline**: Deep OpenColorIO processing. Convert from camera Log to ACEScg before SfM. Automatically exports 16-bit half-float or 32-bit float **EXR** datasets for professional workflows.
-- **📸 3 Input Modes**: Video files (`.mp4`, `.mov`), Image folders, or ReScan LiDAR datasets.
-- **⚡ GPU-Accelerated Extraction & SfM**: FFmpeg with CUDA hardware decoding, and dual SfM engines (choose robust CPU COLMAP or fast GPU [GLOMAP](https://github.com/colmap/glomap)).
-- **📍 LiDAR-Guided Reconstruction**: When using ReScan data, ARKit poses can triangulate the model instantly or guide the full SfM solver.
-- **🧠 State-of-the-Art Matching**: SuperPoint, DISK, ALIKED features with LightGlue / SuperGlue matching via [HLoc](https://github.com/cvg/Hierarchical-Localization).
-- **🛡️ Secure & Optimized**: Multi-threaded file processing skips existing outputs. Secure installation scripts with pinned submodules ensure a reproducible environment preventing missing dependencies. Windows file-lock handling for ultimate stability. Modern CustomTkinter dark UI.
-
----
-
-## 📂 Output Format (Drag-and-Drop)
-
-ReMap produces a standard **COLMAP** dataset structure, specifically optimized to be bundled into a **single, self-contained directory** for modern training engines:
+## Pipeline
 
 ```text
-output_directory/
-├── hloc_outputs/             # Intermediate feature files
-└── sparse/
-    └── 0/
-        └── models/
-            └── 0/
-                └── 0/        # 🎯 Drag-and-drop this folder to your trainer!
-                    ├── cameras.bin
-                    ├── images.bin      # Image paths are automatically re-linked!
-                    ├── points3D.bin
-                    └── images/         # Bundled PNG or EXR frames
-                        ├── 000001.exr
-                        └── ...
+Capture or images
+  -> input probe and frame selection
+  -> optional color conversion / EXR proxy generation
+  -> HLoc or LoMa features
+  -> sequential or exhaustive pairs
+  -> matching
+  -> COLMAP or GLOMAP reconstruction
+  -> bundle normalization
+  -> trainer-ready output folder
 ```
 
-> 💡 **Ready for 3DGS**: Because the `images/` directory is bundled inside the sparse model alongside tweaked `.bin` files, you can immediately drag the `0/0/` folder into tools like **Brush**, **Nerfstudio**, or **gsplat**.
+For ReScan datasets, ReMap can use ARKit odometry and LiDAR depth as part of the
+conversion step, then either run full SfM or use known poses for faster
+triangulation.
 
----
+<!-- Image slot: docs/images/remap-new-job-wizard.png
+     Suggested: screenshot of the Source/Preparation/Color/Reconstruction wizard steps. -->
 
-## 🚀 Installation
+## Inputs
 
-ReMap supports both **Windows** and **Linux**. We provide secure scripts to make this a "one-click install."
+| Mode | Accepted input | Notes |
+| --- | --- | --- |
+| Video | `.mp4`, `.mov`, `.avi`, `.webm`, `.mkv`, `.m4v` | FPS extraction controls how many frames enter SfM |
+| Images | Folder of `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.exr`, `.webp`, `.bmp` | EXR sequences are supported for HDR/color-managed workflows |
+| ReScan | Folder or uploaded ZIP with `rgb.mp4`/`rgb.mov` or `rgb/`, plus `odometry.csv` and `camera_matrix.csv` | Optional `depth/` and `confidence/` folders can guide LiDAR processing |
 
-### Prerequisites
+## Output Layout
 
-| Requirement | Details |
-|---|---|
-| **OS** | Windows 10/11 or Linux (Ubuntu 22.04+ recommended) |
-| **GPU** | NVIDIA GPU with CUDA (strongly recommended) |
-| **Python** | 3.10 or 3.12 (A Virtual Environment is automatically created) |
+The new desktop flow creates a normalized final bundle next to the working
+pipeline output:
 
-### The "One-Click" Automated Install (Recommended)
-
-Our installer handles system dependencies, pinned submodule clones (COLMAP/GLOMAP), Python venvs, and pip packages securely.
-
-**For Linux (Ubuntu):**
-```bash
-git clone https://github.com/YvigUnderscore/ReMap.git
-cd ReMap
-sudo ./install_all.sh
-./launch.sh
+```text
+<output_path>/
+|-- <output_name>_SfM_Dataset_Output/
+|   |-- cameras.bin
+|   |-- images.bin
+|   |-- points3D.bin
+|   |-- images/
+|   |   |-- 000001.exr
+|   |   `-- ...
+|   `-- images_srgb_png/        # optional preview/proxy folder for EXR jobs
+|-- hloc_outputs/
+|-- sparse/0/
+`-- .remap/
+    |-- checkpoints.json
+    `-- fingerprint.json
 ```
 
-**For Windows:**
+Use `<output_name>_SfM_Dataset_Output/` as the drag-and-drop folder for most
+Gaussian Splatting trainers. The legacy `sparse/0/models/0/0/` bundle may still
+exist for compatibility, but the normalized root-level bundle is the preferred
+target.
+
+<!-- Image slot: docs/images/remap-output-bundle.png
+     Suggested: file explorer screenshot showing the normalized final bundle and images folder. -->
+
+## Installation
+
+### Requirements
+
+| Requirement | Why it matters |
+| --- | --- |
+| Windows 10/11 or Ubuntu 22.04+ | Main supported desktop targets |
+| NVIDIA GPU with CUDA | Strongly recommended for matching and reconstruction speed |
+| Python 3.10 or 3.12 | Installer creates `.venv` and installs pinned Python packages |
+| Git and FFmpeg | Required for dependency install and frame extraction/probing |
+| COLMAP | Required SfM backend |
+| GLOMAP | Optional, used when available for faster global mapping |
+| Node.js 20+ | Required for the new React/Tauri desktop shell |
+| Rust toolchain | Required by Tauri dev/build commands |
+
+The Python baseline is pinned in `requirements.txt` and
+`requirements.lock.txt`. LoMa is installed separately by the installer and the
+Settings dependency manager because the upstream package currently needs a small
+metadata workaround.
+
+### Windows
+
 ```bat
 git clone https://github.com/YvigUnderscore/ReMap.git
 cd ReMap
 install_all.bat
+npm install
 launch.bat
 ```
 
-*(For a step-by-step manual setup, refer to older commit histories or open the installer scripts to see the exact system packages required).*
+### Linux
 
----
+```bash
+git clone https://github.com/YvigUnderscore/ReMap.git
+cd ReMap
+sudo ./install_all.sh
+npm install
+./launch.sh
+```
 
-## 🎨 Advanced Color Management (OCIO & EXR)
+If you only need the previous CustomTkinter interface, use `launch_legacy.bat`
+or `./launch_legacy.sh` after running the installer.
 
-ReMap uses **OpenImageIO** to process OpenColorIO workflows, essential for flat/log footage.
+## Launch Options
 
-1. Set your `OCIO` environment variable, or browse for it directly in the app.
-2. If converting to linear spaces (like **ACEScg**), ReMap enables its **EXR Pipeline**. 
-3. Outputs are heavily optimized:
-    - **16-bit PNG** (For integer-based linear workflows)
-    - **16-bit half-float EXR** (Default for ACES/scene-linear — highly efficient)
-    - **32-bit float EXR** (Can be forced manually for maximum precision)
+| Command | Purpose |
+| --- | --- |
+| `launch.bat` / `./launch.sh` | Starts the local backend and opens the new Tauri desktop app |
+| `launch_legacy.bat` / `./launch_legacy.sh` | Opens the previous CustomTkinter UI |
+| `python desktop_backend.py` | Starts only the local desktop backend on `127.0.0.1:8765` |
+| `npm run dev` | Runs the React UI in a browser during frontend development |
+| `npm run desktop:dev` | Runs the full Tauri desktop app in development mode |
+| `python remap_server.py --api-key "secret"` | Starts the ReScan-compatible `/api/v1` server |
 
----
+## Typical Desktop Workflow
 
-## ⚙️ Usage Guide
+1. Open ReMap with `launch.bat` or `./launch.sh`.
+2. Create a job from the New Job wizard.
+3. Drop videos, image folders, or ReScan datasets into the source area.
+4. Pick an output directory and tune FPS, matching, color, and reconstruction options.
+5. Review the frame/pair/disk/time estimates.
+6. Start the job or launch a quality sweep.
+7. Track progress in Jobs, inspect logs and artifacts, then open the final bundle.
 
-### Video & Image Folder Modes
-1. Select **Video** or **Image Folder** mode.
-2. Set extraction FPS (2–5 FPS recommended for video).
-3. Configure the SfM pipeline (defaults work well).
-4. Click **⚡ START PROCESSING**.
+<!-- Image slot: docs/images/remap-jobs-preview.png
+     Suggested: screenshot of the Jobs page with logs, artifacts, ETA, and sparse preview visible. -->
 
-### ReScan (LiDAR) Mode
-1. Select **Rescan (LiDAR)** mode.
-2. Browse to the dataset containing `rgb.mp4` (Apple ProRes Log) or already exported frames into `/images`, `odometry.csv`, and `camera_matrix.csv`.
-3. Choose processing approach:
-   - **Full SfM (Approach B)** — Runs complete SfM. Most robust.
-   - **ARKit Poses (Approach A)** — Uses known poses for fast triangulation.
-4. Set extraction FPS to perfectly sync Log video and ARKit odometry.
+## ReScan Remote Capture
 
-### Recommended Settings
+The remote API server lets ReScan upload datasets over the local network:
 
-| Setting | Video (Standard) | Video (Apple Log) | ReScan (LiDAR) |
-|---|---|---|---|
-| Features / Matcher | SuperPoint / LightGlue | SuperPoint / LightGlue | SuperPoint / LightGlue |
-| SfM Engine | GLOMAP | GLOMAP | GLOMAP |
-| OCIO | Off | On (Log → ACEScg) | On (Linear - sRGB → ACEScg) |
-| Image Output | PNG (8-bit) | EXR (16-bit Half) | PNG (8-bit) |
+1. Open the Server page in the desktop app.
+2. Set the host, port, API key, and output directory.
+3. Start the `/api/v1` server.
+4. Scan the Quick Connect QR code in ReScan or copy the URL and key manually.
+5. Capture on iPhone, upload to ReMap, then monitor processing from desktop or API.
 
----
+The standalone server can also be launched directly:
 
-## 📄 License & 🤝 Acknowledgements
+```bash
+python remap_server.py --host 0.0.0.0 --port 5000 --api-key "your-key"
+```
 
-**License:** Output data (reconstructions) are 100% yours to commercialize. The source code is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (Non-Commercial). 
+See [API_DOCUMENTATION.md](API_DOCUMENTATION.md) for endpoint details, curl
+examples, payload fields, colorspace values, and the internal desktop API.
 
-**Thanks to:** [HLoc](https://github.com/cvg/Hierarchical-Localization) | [COLMAP](https://colmap.github.io/) | [GLOMAP](https://github.com/colmap/glomap) | [SuperPoint & LightGlue](https://github.com/cvg/LightGlue) | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) | [ReScan](https://github.com/YvigUnderscore/ReScan)
+<!-- Image slot: docs/images/remap-rescan-quick-connect.png
+     Suggested: screenshot of the Server page showing QR code, base URL, API key, and health state. -->
+
+## Color Pipeline
+
+ReMap has two goals when color management is enabled: give SfM a stable image
+proxy to match against, and keep the final training images in the color space
+you actually want.
+
+Built-in sources include:
+
+- Auto-detect
+- Apple Log (BT.2020)
+- HLG (BT.2020)
+- Linear BT.2020
+- Linear ACEScg
+- Linear sRGB
+- sRGB (Rec.709)
+
+Built-in outputs include:
+
+- ACEScg with EXR output plus optional sRGB PNG previews
+- Linear sRGB
+- sRGB tone mapped
+- Custom OCIO transforms
+
+For Apple Log or HDR sources, the recommended path is usually ACEScg EXR output
+with `images_srgb_png/` kept for quick inspection.
+
+## Matching And Reconstruction
+
+| Stage | Options |
+| --- | --- |
+| Features | `superpoint_aachen`, `superpoint_max`, `disk`, `aliked-n16`, `sift` |
+| Matchers | `superpoint+lightglue`, `superglue`, `disk+lightglue`, `adalam`, `loma_b`, `loma_g` |
+| Pairing | Sequential video pairs or exhaustive pairs for smaller sets |
+| SfM | COLMAP or GLOMAP |
+| ReScan pose mode | Full SfM or ARKit known poses |
+
+`loma_b` is the faster LoMa option. `loma_g` is heavier and more accurate, and
+is best reserved for difficult datasets or quality sweeps.
+
+## Repository Layout
+
+```text
+backend/                  Local desktop backend services
+frontend/                 React/Tauri UI source
+src-tauri/                Tauri shell, file dialogs, notifications
+backend_state/            Local settings, job store, cache, fault logs
+LUTS/                     Apple Log and HDR conversion LUTs
+SuperGluePretrainedNetwork/  External SuperGlue weights/code folder
+ReMap-GUI.py              Legacy UI and processing implementation
+remap_server.py           ReScan-compatible public API server
+desktop_backend.py        Local desktop backend entry point
+```
+
+## Troubleshooting
+
+- If the new UI says frontend dependencies are missing, run `npm install`.
+- If Tauri fails to start, confirm Rust/Cargo is installed and available in the shell.
+- If GLOMAP is missing, ReMap falls back to COLMAP.
+- If EXR or OCIO conversion fails, check OpenImageIO in Settings and verify the selected `.ocio` file.
+- If a run repeats the same work, check whether `skip_existing` and the global cache are enabled.
+- Use `kill_remap.bat`, `kill_remap.ps1`, or `kill_remap.sh` if a backend or server process is stuck.
+
+## License And Acknowledgements
+
+Output data and reconstructions are yours to use commercially. The source code
+is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+
+Thanks to
+[HLoc](https://github.com/cvg/Hierarchical-Localization),
+[COLMAP](https://colmap.github.io/),
+[GLOMAP](https://github.com/colmap/glomap),
+[LightGlue](https://github.com/cvg/LightGlue),
+[SuperGlue](https://github.com/magicleap/SuperGluePretrainedNetwork),
+[LoMa](https://github.com/davnords/LoMa),
+[OpenImageIO](https://openimageio.readthedocs.io/),
+[Tauri](https://tauri.app/), and
+[ReScan](https://github.com/YvigUnderscore/ReScan).
