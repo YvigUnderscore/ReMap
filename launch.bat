@@ -4,6 +4,9 @@ chcp 65001 >nul 2>&1
 
 cd /d "%~dp0"
 
+set "LOCAL_NODE_DIR=%~dp0.tools\node"
+if exist "%LOCAL_NODE_DIR%\node.exe" set "PATH=%LOCAL_NODE_DIR%;%PATH%"
+
 if not exist ".venv\Scripts\activate.bat" (
     echo ERROR: Virtual environment not found. Run install_all.bat first.
     pause
@@ -19,14 +22,14 @@ if not exist "%PYTHON_EXE%" (
 
 where node >nul 2>&1
 if !ERRORLEVEL! neq 0 (
-    echo ERROR: Node.js not found. Install Node.js 20+ before launching the new desktop UI.
+    echo ERROR: Node.js not found. Run install_all.bat option 9 to install portable Node.js.
     pause
     exit /b 1
 )
 
 if not exist "node_modules" (
     echo ERROR: Frontend dependencies are missing.
-    echo Run: cmd /c npm.cmd install
+    echo Run: install_all.bat --frontend
     echo You can still launch the previous UI with launch_legacy.bat
     pause
     exit /b 1

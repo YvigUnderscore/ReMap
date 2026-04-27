@@ -119,7 +119,7 @@ target.
 | Git and FFmpeg | Required for dependency install and frame extraction/probing |
 | COLMAP | Required SfM backend |
 | GLOMAP | Optional, used when available for faster global mapping |
-| Node.js 20+ | Installer checks/installs it for the new React/Tauri desktop shell |
+| Node.js 20+ | Windows installer uses a portable local Node.js without admin rights; Linux installer uses the system package manager |
 | Rust toolchain | Installer checks/installs it and fetches Tauri Cargo dependencies |
 
 The Python baseline is pinned in `requirements.txt` and
@@ -250,7 +250,9 @@ desktop_backend.py        Local desktop backend entry point
 ## Troubleshooting
 
 - If the new UI says frontend dependencies are missing, rerun the installer and choose option `10`.
+- On Windows, rerun `install_all.bat --node` to refresh the portable local Node.js in `.tools/node`.
 - If Tauri fails to start, confirm Rust/Cargo is installed and available in the shell.
+- If Python requirements fail to install, rerun installer option `7` and inspect `backend_state/install_logs/pip_install.log`.
 - If GLOMAP is missing, ReMap falls back to COLMAP.
 - If EXR or OCIO conversion fails, check OpenImageIO in Settings and verify the selected `.ocio` file.
 - If a run repeats the same work, check whether `skip_existing` and the global cache are enabled.

@@ -78,7 +78,7 @@ scan_system() {
 
     # 7. Pip requirements
     if [ $HAS_VENV -eq 1 ]; then
-        if sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/python3 -c 'import hloc, loma, psutil'" 2>/dev/null; then
+        if run_as_target_user "cd '$SCRIPT_DIR' && .venv/bin/python3 -c 'import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO'" 2>/dev/null; then
             HAS_PIP_REQ=1
         fi
     fi
@@ -244,12 +244,26 @@ install_pip() {
         read -p "Press Enter to continue..."
         return
     fi
+    PIP_LOG_DIR="$SCRIPT_DIR/backend_state/install_logs"
+    PIP_LOG="$PIP_LOG_DIR/pip_install.log"
+    mkdir -p "$PIP_LOG_DIR"
+    touch "$PIP_LOG"
+    if [ -n "$SUDO_USER" ]; then
+        chown -R "$TARGET_USER":"$TARGET_USER" "$PIP_LOG_DIR"
+    fi
+    echo "Writing pip install log to: $PIP_LOG"
+    echo "==== ReMap pip install $(date) ====" > "$PIP_LOG"
     echo "Installing/Upgrading pip requirements..."
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --upgrade pip"
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install -r requirements.txt"
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --ignore-requires-python dataclasses==0.8"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --upgrade pip 2>&1 | tee -a '$PIP_LOG'"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install -r requirements.txt 2>&1 | tee -a '$PIP_LOG'"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --ignore-requires-python dataclasses==0.8 2>&1 | tee -a '$PIP_LOG'"
     echo "Installing pinned LoMa from official repository (--no-deps; dependencies are pinned in requirements.txt)..."
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --no-deps --force-reinstall 'git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch'"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --no-deps --force-reinstall 'git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch' 2>&1 | tee -a '$PIP_LOG'"
+    echo "Verifying Python dependency consistency..."
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/python3 -m pip check 2>&1 | tee -a '$PIP_LOG'"
+    echo "Verifying required imports..."
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/python3 -c 'import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO' 2>&1 | tee -a '$PIP_LOG'"
+    echo "PIP packages installed and verified successfully."
     read -p "Press Enter to continue..."
 }
 

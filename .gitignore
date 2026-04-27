@@ -21,6 +21,7 @@ venv/
 Thumbs.db
 
 # Build artifacts
+.tools/
 glomap_build/
 SuperGluePretrainedNetwork/
 node_modules/

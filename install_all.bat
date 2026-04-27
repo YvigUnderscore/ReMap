@@ -20,10 +20,16 @@ set "HAS_RUST_DEPS=0"
 
 set "PYTHON_CMD="
 set "NO_PAUSE=0"
+set "LOCAL_NODE_DIR=%~dp0.tools\node"
+if exist "%LOCAL_NODE_DIR%\node.exe" set "PATH=%LOCAL_NODE_DIR%;%PATH%"
 
 if /i "%~1"=="--frontend" (
     set "NO_PAUSE=1"
     goto :install_frontend
+)
+if /i "%~1"=="--node" (
+    set "NO_PAUSE=1"
+    goto :install_node
 )
 if /i "%~1"=="--rust-deps" (
     set "NO_PAUSE=1"
@@ -76,7 +82,7 @@ if exist ".venv\Scripts\activate.bat" (set "HAS_VENV=1") else (set "HAS_VENV=0")
 
 :: 7. Python Requirements (Approximate check via hloc, LoMa and psutil)
 if !HAS_VENV! equ 1 (
-    .venv\Scripts\python.exe -c "import hloc, loma, psutil" >nul 2>&1
+    .venv\Scripts\python.exe -c "import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO" >nul 2>&1
     if !ERRORLEVEL! equ 0 (set "HAS_PIP_REQ=1") else (set "HAS_PIP_REQ=0")
 ) else (
     set "HAS_PIP_REQ=0"
@@ -426,33 +432,68 @@ if !HAS_VENV! equ 0 (
     pause
     goto :eof
 )
+set "PIP_LOG_DIR=%~dp0backend_state\install_logs"
+if not exist "!PIP_LOG_DIR!" mkdir "!PIP_LOG_DIR!" >nul 2>&1
+set "PIP_LOG=!PIP_LOG_DIR!\pip_install.log"
+echo Writing pip install log to: !PIP_LOG!
+echo ==== ReMap pip install %DATE% %TIME% ==== > "!PIP_LOG!"
 echo Installing/Upgrading pip requirements...
 call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip
+echo ^> python -m pip install --upgrade pip >> "!PIP_LOG!"
+python -m pip install --upgrade pip >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
 
 echo Removing any existing CPU-only PyTorch versions...
-python -m pip uninstall torch torchvision torchaudio -y
+echo ^> python -m pip uninstall torch torchvision torchaudio -y >> "!PIP_LOG!"
+python -m pip uninstall torch torchvision torchaudio -y >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
 
 echo Installing PyTorch with CUDA 12.8 support...
-python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+echo ^> python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 >> "!PIP_LOG!"
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
 
 echo Installing other dependencies...
-pip install -r requirements.txt
-if !ERRORLEVEL! neq 0 (
-    echo WARNING: Some packages failed to install.
-) else (
-    echo Requirements installed successfully.
-)
+echo ^> python -m pip install -r requirements.txt >> "!PIP_LOG!"
+python -m pip install -r requirements.txt >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
+echo Requirements installed successfully.
 
 echo Installing LoMa metadata compatibility shim...
-python -m pip install --ignore-requires-python dataclasses==0.8
+echo ^> python -m pip install --ignore-requires-python dataclasses==0.8 >> "!PIP_LOG!"
+python -m pip install --ignore-requires-python dataclasses==0.8 >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
 
 echo Installing pinned LoMa from official repository ^(--no-deps; dependencies are pinned in requirements.txt^)...
-python -m pip install --no-deps --force-reinstall "git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch"
-if !ERRORLEVEL! neq 0 (
-    echo WARNING: LoMa failed to install. Check Git and network access, then rerun option 7.
-)
+echo ^> python -m pip install --no-deps --force-reinstall git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch >> "!PIP_LOG!"
+python -m pip install --no-deps --force-reinstall "git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch" >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
+
+echo Verifying Python dependency consistency...
+echo ^> python -m pip check >> "!PIP_LOG!"
+python -m pip check >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
+
+echo Verifying required imports...
+echo ^> python -c "import required modules" >> "!PIP_LOG!"
+python -c "import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO" >> "!PIP_LOG!" 2>&1
+if !ERRORLEVEL! neq 0 goto :pip_failed
+
+echo PIP packages installed and verified successfully.
 pause
+goto :eof
+
+:pip_failed
+echo.
+echo ERROR: Python dependency installation failed.
+echo See the full log here:
+echo   !PIP_LOG!
+echo.
+echo Common causes on a fresh machine:
+echo   - Python version not supported by pinned wheels.
+echo   - CUDA/PyTorch cu128 wheels unavailable for the platform.
+echo   - Git/network access blocked for HLoc, LightGlue, or LoMa.
+call :wait
 goto :eof
 
 :install_superglue
@@ -475,18 +516,47 @@ goto :eof
 :install_node
 echo.
 echo --- [9/11] Node.js / npm ---
-where winget >nul 2>&1
-if !ERRORLEVEL! equ 0 (
-    echo Installing or upgrading Node.js LTS via winget...
-    winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
-    if !ERRORLEVEL! neq 0 (
-        echo Trying winget upgrade for Node.js LTS...
-        winget upgrade --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
-    )
-    call :refresh_path
+echo Installing portable Node.js LTS without admin rights...
+set "PS_SCRIPT=%TEMP%\remap_install_node.ps1"
+> "!PS_SCRIPT!" echo $ErrorActionPreference = 'Stop'
+>> "!PS_SCRIPT!" echo $ProgressPreference = 'SilentlyContinue'
+>> "!PS_SCRIPT!" echo $repo = (Resolve-Path '.').Path
+>> "!PS_SCRIPT!" echo $toolsDir = Join-Path $repo '.tools'
+>> "!PS_SCRIPT!" echo $installDir = Join-Path $toolsDir 'node'
+>> "!PS_SCRIPT!" echo $installFull = [System.IO.Path]::GetFullPath($installDir)
+>> "!PS_SCRIPT!" echo $toolsFull = [System.IO.Path]::GetFullPath($toolsDir)
+>> "!PS_SCRIPT!" echo if (-not $installFull.StartsWith($toolsFull, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to install Node outside .tools' }
+>> "!PS_SCRIPT!" echo New-Item -ItemType Directory -Force -Path $toolsDir ^| Out-Null
+>> "!PS_SCRIPT!" echo $arch = if ([Environment]::Is64BitOperatingSystem) { 'win-x64' } else { 'win-x86' }
+>> "!PS_SCRIPT!" echo $fileToken = "$arch-zip"
+>> "!PS_SCRIPT!" echo Write-Host '  Querying Node.js release index...'
+>> "!PS_SCRIPT!" echo $index = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json'
+>> "!PS_SCRIPT!" echo $release = $index ^| Where-Object { $_.lts -and $_.files -contains $fileToken -and [int]($_.version.TrimStart('v').Split('.')[0]) -ge 20 } ^| Select-Object -First 1
+>> "!PS_SCRIPT!" echo if (-not $release) { throw 'No compatible Node.js LTS release found' }
+>> "!PS_SCRIPT!" echo $zipName = "node-$($release.version)-$arch.zip"
+>> "!PS_SCRIPT!" echo $url = "https://nodejs.org/dist/$($release.version)/$zipName"
+>> "!PS_SCRIPT!" echo $zipPath = Join-Path $env:TEMP $zipName
+>> "!PS_SCRIPT!" echo $extractDir = Join-Path $env:TEMP "remap-node-$($release.version)-$arch"
+>> "!PS_SCRIPT!" echo Write-Host "  Downloading $zipName..."
+>> "!PS_SCRIPT!" echo Invoke-WebRequest -Uri $url -OutFile $zipPath
+>> "!PS_SCRIPT!" echo if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
+>> "!PS_SCRIPT!" echo if (Test-Path $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
+>> "!PS_SCRIPT!" echo Write-Host '  Extracting portable Node.js...'
+>> "!PS_SCRIPT!" echo Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+>> "!PS_SCRIPT!" echo $expanded = Get-ChildItem -Path $extractDir -Directory ^| Select-Object -First 1
+>> "!PS_SCRIPT!" echo if (-not $expanded) { throw 'Node.js archive did not contain an install directory' }
+>> "!PS_SCRIPT!" echo Move-Item -LiteralPath $expanded.FullName -Destination $installDir
+>> "!PS_SCRIPT!" echo Remove-Item -LiteralPath $zipPath -Force
+>> "!PS_SCRIPT!" echo Remove-Item -LiteralPath $extractDir -Recurse -Force
+>> "!PS_SCRIPT!" echo Write-Host "  Node.js $($release.version) installed to $installDir"
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"
+set "NODE_INSTALL_EXIT=!ERRORLEVEL!"
+del "!PS_SCRIPT!" 2>nul
+if !NODE_INSTALL_EXIT! neq 0 (
+    echo ERROR: Portable Node.js installation failed.
 ) else (
-    echo winget not found. Install Node.js 20+ manually:
-    echo https://nodejs.org/
+    set "PATH=%LOCAL_NODE_DIR%;%PATH%"
+    echo Portable Node.js is ready for ReMap.
 )
 call :wait
 goto :eof
