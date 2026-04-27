@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 chcp 65001 >nul 2>&1
+cd /d "%~dp0"
 
 :: Variables for state
 set "HAS_PYTHON=0"
@@ -11,8 +12,23 @@ set "HAS_GLOMAP=0"
 set "HAS_VENV=0"
 set "HAS_PIP_REQ=0"
 set "HAS_SUPERGLUE=0"
+set "HAS_NODE=0"
+set "HAS_NPM=0"
+set "HAS_FRONTEND=0"
+set "HAS_CARGO=0"
+set "HAS_RUST_DEPS=0"
 
 set "PYTHON_CMD="
+set "NO_PAUSE=0"
+
+if /i "%~1"=="--frontend" (
+    set "NO_PAUSE=1"
+    goto :install_frontend
+)
+if /i "%~1"=="--rust-deps" (
+    set "NO_PAUSE=1"
+    goto :install_rust_deps
+)
 
 :scan
 cls
@@ -69,6 +85,39 @@ if !HAS_VENV! equ 1 (
 :: 8. SuperGlue
 if exist "SuperGluePretrainedNetwork" (set "HAS_SUPERGLUE=1") else (set "HAS_SUPERGLUE=0")
 
+:: 9. Node.js 20+ and npm
+set "HAS_NODE=0"
+set "HAS_NPM=0"
+set "NODE_MAJOR="
+where node >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    for /f "tokens=1 delims=." %%v in ('node -v 2^>nul') do set "NODE_MAJOR=%%v"
+    set "NODE_MAJOR=!NODE_MAJOR:v=!"
+    if defined NODE_MAJOR (
+        if !NODE_MAJOR! geq 20 set "HAS_NODE=1"
+    )
+)
+where npm >nul 2>&1
+if !ERRORLEVEL! equ 0 set "HAS_NPM=1"
+
+:: 10. Frontend npm packages
+if !HAS_NODE! equ 1 if !HAS_NPM! equ 1 (
+    cmd /c npm.cmd ls --depth=0 >nul 2>&1
+    if !ERRORLEVEL! equ 0 (set "HAS_FRONTEND=1") else (set "HAS_FRONTEND=0")
+) else (
+    set "HAS_FRONTEND=0"
+)
+
+:: 11. Rust/Cargo dependencies for Tauri
+where cargo >nul 2>&1
+if !ERRORLEVEL! equ 0 (set "HAS_CARGO=1") else (set "HAS_CARGO=0")
+if !HAS_CARGO! equ 1 (
+    cargo metadata --manifest-path src-tauri\Cargo.toml --locked --offline --format-version 1 >nul 2>&1
+    if !ERRORLEVEL! equ 0 (set "HAS_RUST_DEPS=1") else (set "HAS_RUST_DEPS=0")
+) else (
+    set "HAS_RUST_DEPS=0"
+)
+
 :menu
 cls
 echo.
@@ -86,6 +135,13 @@ if !HAS_GLOMAP! equ 1 (echo   [5] GLOMAP      : [OK ^(Optional^)]) else (echo   
 if !HAS_VENV! equ 1 (echo   [6] Python venv : [OK]) else (echo   [6] Python venv : [MISSING])
 if !HAS_PIP_REQ! equ 1 (echo   [7] PIP packages: [OK]) else (echo   [7] PIP packages: [MISSING])
 if !HAS_SUPERGLUE! equ 1 (echo   [8] SuperGlue   : [OK]) else (echo   [8] SuperGlue   : [MISSING])
+if !HAS_NODE! equ 1 (echo   [9] Node.js/npm : [OK]) else (echo   [9] Node.js/npm : [MISSING])
+if !HAS_FRONTEND! equ 1 (echo   [10] Frontend   : [OK]) else (echo   [10] Frontend   : [MISSING])
+if !HAS_CARGO! equ 1 (
+    if !HAS_RUST_DEPS! equ 1 (echo   [11] Tauri/Rust : [OK]) else (echo   [11] Tauri/Rust : [MISSING])
+) else (
+    echo   [11] Tauri/Rust : [MISSING]
+)
 
 echo.
 echo   Actions:
@@ -94,7 +150,7 @@ echo   [F] Full Reinstall ^(Force all^)
 echo   [L] Launch ReMap GUI
 echo   [Q] Quit
 echo.
-echo   Type 1-8 to reinstall/configure a specific component.
+echo   Type 1-11 to reinstall/configure a specific component.
 echo.
 
 set /p CHOICE="> Select an option: "
@@ -113,6 +169,10 @@ if /i "!CHOICE!"=="A" (
     if !HAS_VENV! equ 0 call :install_venv
     if !HAS_PIP_REQ! equ 0 call :install_pip
     if !HAS_SUPERGLUE! equ 0 call :install_superglue
+    if !HAS_NODE! equ 0 call :install_node
+    if !HAS_FRONTEND! equ 0 call :install_frontend
+    if !HAS_CARGO! equ 0 call :install_rust
+    if !HAS_RUST_DEPS! equ 0 call :install_rust_deps
     goto :scan
 )
 
@@ -127,6 +187,10 @@ if /i "!CHOICE!"=="F" (
     call :install_venv
     call :install_pip
     call :install_superglue
+    call :install_node
+    call :install_frontend
+    call :install_rust
+    call :install_rust_deps
     goto :scan
 )
 
@@ -138,6 +202,9 @@ if "!CHOICE!"=="5" call :install_glomap & goto :scan
 if "!CHOICE!"=="6" call :install_venv & goto :scan
 if "!CHOICE!"=="7" call :install_pip & goto :scan
 if "!CHOICE!"=="8" call :install_superglue & goto :scan
+if "!CHOICE!"=="9" call :install_node & goto :scan
+if "!CHOICE!"=="10" call :install_frontend & goto :scan
+if "!CHOICE!"=="11" call :install_rust & call :install_rust_deps & goto :scan
 
 goto :menu
 
@@ -170,7 +237,7 @@ exit /b 0
 
 :install_python
 echo.
-echo --- [1/8] Python ---
+echo --- [1/11] Python ---
 echo Python 3.10+ must be installed manually.
 echo Download from: https://www.python.org/downloads/
 echo IMPORTANT: Check "Add python.exe to PATH" during install.
@@ -181,7 +248,7 @@ goto :eof
 
 :install_git
 echo.
-echo --- [2/8] Git ---
+echo --- [2/11] Git ---
 where winget >nul 2>&1
 if !ERRORLEVEL! equ 0 (
     echo Installing Git via winget...
@@ -212,7 +279,7 @@ goto :eof
 
 :install_ffmpeg
 echo.
-echo --- [3/8] FFmpeg ---
+echo --- [3/11] FFmpeg ---
 where winget >nul 2>&1
 if !ERRORLEVEL! equ 0 (
     echo Installing FFmpeg via winget...
@@ -251,7 +318,7 @@ goto :eof
 
 :install_colmap
 echo.
-echo --- [4/8] COLMAP ---
+echo --- [4/11] COLMAP ---
 echo Downloading COLMAP from GitHub releases...
 set "PS_SCRIPT=%TEMP%\remap_install_colmap.ps1"
 > "!PS_SCRIPT!" echo $ErrorActionPreference = 'Stop'
@@ -291,7 +358,7 @@ goto :eof
 
 :install_glomap
 echo.
-echo --- [5/8] GLOMAP ---
+echo --- [5/11] GLOMAP ---
 echo Downloading GLOMAP from GitHub releases...
 set "PS_SCRIPT=%TEMP%\remap_install_glomap.ps1"
 > "!PS_SCRIPT!" echo $ErrorActionPreference = 'Stop'
@@ -331,7 +398,7 @@ goto :eof
 
 :install_venv
 echo.
-echo --- [6/8] Python Virtual Environment ---
+echo --- [6/11] Python Virtual Environment ---
 if !HAS_PYTHON! equ 0 (
     echo Python must be installed first.
     pause
@@ -353,7 +420,7 @@ goto :eof
 
 :install_pip
 echo.
-echo --- [7/8] PIP Packages ---
+echo --- [7/11] PIP Packages ---
 if !HAS_VENV! equ 0 (
     echo Virtual environment must be created first.
     pause
@@ -390,7 +457,7 @@ goto :eof
 
 :install_superglue
 echo.
-echo --- [8/8] SuperGluePretrainedNetwork ---
+echo --- [8/11] SuperGluePretrainedNetwork ---
 if !HAS_GIT! equ 0 (
     echo Git must be installed first to clone the repository.
     pause
@@ -402,6 +469,121 @@ if exist "SuperGluePretrainedNetwork" (
 )
 echo Cloning SuperGluePretrainedNetwork...
 git clone https://github.com/magicleap/SuperGluePretrainedNetwork.git
+pause
+goto :eof
+
+:install_node
+echo.
+echo --- [9/11] Node.js / npm ---
+where winget >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo Installing or upgrading Node.js LTS via winget...
+    winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
+    if !ERRORLEVEL! neq 0 (
+        echo Trying winget upgrade for Node.js LTS...
+        winget upgrade --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
+    )
+    call :refresh_path
+) else (
+    echo winget not found. Install Node.js 20+ manually:
+    echo https://nodejs.org/
+)
+call :wait
+goto :eof
+
+:install_frontend
+echo.
+echo --- [10/11] Frontend Packages ---
+set "NODE_MAJOR="
+where node >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    echo Node.js is missing. Installing Node.js first...
+    call :install_node
+)
+where npm >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    echo ERROR: npm was not found. Install Node.js 20+ and rerun this option.
+    call :wait
+    goto :eof
+)
+for /f "tokens=1 delims=." %%v in ('node -v 2^>nul') do set "NODE_MAJOR=%%v"
+set "NODE_MAJOR=!NODE_MAJOR:v=!"
+if not defined NODE_MAJOR (
+    echo ERROR: Could not detect the Node.js version.
+    call :wait
+    goto :eof
+)
+if !NODE_MAJOR! lss 20 (
+    echo ERROR: Node.js 20+ is required. Current major version: !NODE_MAJOR!
+    call :install_node
+    call :wait
+    goto :eof
+)
+if exist "package-lock.json" (
+    echo Installing frontend dependencies from package-lock.json...
+    cmd /c npm.cmd ci
+) else (
+    echo Installing frontend dependencies...
+    cmd /c npm.cmd install
+)
+if !ERRORLEVEL! neq 0 (
+    echo WARNING: Frontend dependency installation failed.
+) else (
+    echo Frontend dependencies installed successfully.
+)
+call :wait
+goto :eof
+
+:install_rust
+echo.
+echo --- [11/11] Rust Toolchain ---
+where cargo >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo Rust/Cargo is already available.
+    call :wait
+    goto :eof
+)
+where winget >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo Installing Rustup via winget...
+    winget install --id Rustlang.Rustup -e --source winget --accept-package-agreements --accept-source-agreements
+    call :refresh_path
+    if exist "%USERPROFILE%\.cargo\bin" set "PATH=%PATH%;%USERPROFILE%\.cargo\bin"
+) else (
+    echo winget not found. Install Rustup manually:
+    echo https://rustup.rs/
+)
+where rustup >nul 2>&1
+if !ERRORLEVEL! equ 0 rustup default stable
+where cargo >nul 2>&1
+if !ERRORLEVEL! neq 0 echo WARNING: Cargo is still not available in PATH. Open a new terminal or rerun the installer.
+call :wait
+goto :eof
+
+:install_rust_deps
+echo.
+echo --- [11/11] Tauri / Cargo Dependencies ---
+where cargo >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    echo Cargo is missing. Install Rust first.
+    call :wait
+    goto :eof
+)
+echo Fetching Rust dependencies for the Tauri shell...
+cargo fetch --manifest-path src-tauri\Cargo.toml --locked
+if !ERRORLEVEL! neq 0 (
+    echo WARNING: Cargo dependency fetch failed.
+) else (
+    echo Tauri/Rust dependencies fetched successfully.
+)
+call :wait
+goto :eof
+
+:: ==========================================
+::  Wait helper
+:: ==========================================
+:wait
+if /i "%NO_PAUSE%"=="1" goto :eof
 pause
 goto :eof
 
