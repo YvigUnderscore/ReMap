@@ -58,6 +58,26 @@ _MAT_SRGB_TO_ACESCG = np.array(
     dtype=np.float32,
 )
 
+# S-Gamut 3 → ACEScg (AP1) — CIE XYZ Bradford D65→D60
+_MAT_SGAMUT3_TO_ACESCG = np.array(
+    [
+        [0.89939648, 0.07802389, 0.01011547],
+        [-0.02150880, 1.03393865, -0.01166953],
+        [0.00530499, -0.00843881, 1.08028662],
+    ],
+    dtype=np.float32,
+)
+
+# S-Gamut 3 → sRGB (Rec.709)
+_MAT_SGAMUT3_TO_SRGB = np.array(
+    [
+        [1.50919890, -0.45070431, -0.05848625],
+        [-0.03419879, 1.08227801, -0.04804975],
+        [0.00297393, -0.07857294, 1.07568979],
+    ],
+    dtype=np.float32,
+)
+
 
 def _apply_matrix(rgb: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     orig_shape = rgb.shape
@@ -173,6 +193,18 @@ def _aces_tonemap(values: np.ndarray) -> np.ndarray:
     return np.clip((values * (a * values + b)) / (values * (c * values + d) + e), 0.0, 1.0)
 
 
+def _slog3_to_linear(values: np.ndarray) -> np.ndarray:
+    """Sony S-Log 3 EOTF — code value (0-1) to scene-linear."""
+    encoded = np.asarray(values, dtype=np.float32)
+    cut = 171.2102946929 / 1023.0  # ≈ 0.16736
+    linear = np.where(
+        encoded >= cut,
+        np.power(10.0, (encoded * 1023.0 - 420.0) / 261.5) * (0.18 + 0.01) - 0.01,
+        (encoded * 1023.0 - 95.0) * 0.01125000 / (171.2102946929 - 95.0),
+    )
+    return np.maximum(linear, 0.0)
+
+
 def _linearize(rgb_norm: np.ndarray, source: str) -> np.ndarray:
     source = _canonical_source(source)
     if source in ("Linear BT.2020", "Linear sRGB"):
@@ -187,6 +219,8 @@ def _linearize(rgb_norm: np.ndarray, source: str) -> np.ndarray:
         return _hlg_eotf(rgb_norm)
     if source == "sRGB (Rec.709)":
         return _srgb_eotf(rgb_norm)
+    if source == "S-Log 3 (S-Gamut 3)":
+        return _slog3_to_linear(rgb_norm)
     return rgb_norm
 
 
@@ -196,6 +230,8 @@ def _source_primaries(source: str) -> str:
         return "bt2020"
     if source == LINEAR_ACESCG_SOURCE:
         return "acescg"
+    if source == "S-Log 3 (S-Gamut 3)":
+        return "sgamut3"
     return "srgb"
 
 
@@ -205,6 +241,8 @@ def _gamut_convert(rgb_linear: np.ndarray, src_primaries: str, dst_primaries: st
         ("bt2020", "srgb"): _MAT_BT2020_TO_SRGB,
         ("srgb", "acescg"): _MAT_SRGB_TO_ACESCG,
         ("acescg", "srgb"): _MAT_ACESCG_TO_SRGB,
+        ("sgamut3", "acescg"): _MAT_SGAMUT3_TO_ACESCG,
+        ("sgamut3", "srgb"): _MAT_SGAMUT3_TO_SRGB,
     }
     matrix = matrices.get((src_primaries, dst_primaries))
     if matrix is not None:
@@ -225,6 +263,12 @@ def _canonical_source(source: str | None) -> str:
         return "sRGB (Rec.709)"
     if lower in {"linear bt.2020", "linear bt2020", "bt2020"}:
         return "Linear BT.2020"
+    if lower in {
+        "s-log 3 (s-gamut 3)", "slog3", "s-log3", "s-log 3",
+        "s-gamut 3", "sgamut3", "s-gamut3",
+        "slog3_sgamut3", "s-log3/s-gamut3",
+    }:
+        return "S-Log 3 (S-Gamut 3)"
     return normalized or "Linear sRGB"
 
 
@@ -342,6 +386,36 @@ def write_sfm_proxy_png(
     return resolved_source
 
 
+def _get_linear_rgb_and_primaries(
+    img_path: Path,
+    source_space: str,
+    dest_space: str | None,
+    cs_in: str | None,
+    cs_out: str | None,
+    colorconfig_path: str | None,
+) -> tuple[np.ndarray, str]:
+    if dest_space == "Custom OCIO..." and HAS_OCIO and cs_in:
+        buf = oiio.ImageBuf(str(img_path))
+        if not buf.has_error:
+            out_buf = oiio.ImageBuf(buf.spec())
+            res = oiio.ImageBufAlgo.colorconvert(
+                out_buf, buf, cs_in, cs_out or "", colorconfig=colorconfig_path or ""
+            )
+            if res:
+                pixels = out_buf.get_pixels(oiio.FLOAT)
+                if pixels.ndim == 2:
+                    pixels = pixels[..., None]
+                if pixels.shape[2] == 1:
+                    pixels = np.repeat(pixels, 3, axis=2)
+                return pixels[..., :3].astype(np.float32, copy=False), "acescg"
+
+    source_space = _source_from_oiio_metadata(img_path, source_space)
+    rgb, _ = _read_rgb_float(img_path)
+    linear_rgb = _linearize(rgb, source_space)
+    src_prim = _source_primaries(source_space)
+    return linear_rgb, src_prim
+
+
 def process_image_color_worker(
     img_path_str: str,
     source_space: str,
@@ -353,31 +427,25 @@ def process_image_color_worker(
 ) -> tuple[bool, str | None]:
     img_path = Path(img_path_str)
 
-    if dest_space == "Custom OCIO..." and HAS_OCIO:
-        try:
-            buf = oiio.ImageBuf(str(img_path))
-            if not buf.has_error:
-                result = oiio.ImageBufAlgo.colorconvert(
-                    buf,
-                    buf,
-                    cs_in,
-                    cs_out,
-                    colorconfig=colorconfig_path or "",
-                )
-                if result:
-                    buf.write(str(img_path))
-                    return True, None
-        except Exception as exc:
-            return False, str(exc)
-        return False, "OCIO Error"
-
     try:
-        source_space = _source_from_oiio_metadata(img_path, source_space)
-        img_rgb, _ = _read_rgb_float(img_path)
-        h, w, ch = img_rgb.shape
-        linear_rgb = _linearize(img_rgb, source_space)
-        src_prim = _source_primaries(source_space)
+        linear_rgb, src_prim = _get_linear_rgb_and_primaries(
+            img_path, source_space, dest_space, cs_in, cs_out, colorconfig_path
+        )
         input_is_exr = img_path.suffix.lower() == ".exr"
+
+        if dest_space == "Custom OCIO...":
+            if not HAS_OCIO:
+                return False, "OCIO Error: Not installed"
+            if exr_out_dir_str:
+                os.makedirs(exr_out_dir_str, exist_ok=True)
+                out_exr = str(Path(exr_out_dir_str) / f"{img_path.stem}.exr")
+            else:
+                out_exr = str(img_path).rsplit(".", 1)[0] + ".exr"
+            _write_exr(Path(out_exr), linear_rgb, cs_out or "")
+            
+            srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
+            _write_srgb_png(img_path, _sfm_proxy_display_rgb(srgb_linear))
+            return True, None
 
         if dest_space == "ACEScg (EXR + sRGB PNG)":
             acescg_rgb = _gamut_convert(linear_rgb, src_prim, "acescg")
@@ -388,9 +456,6 @@ def process_image_color_worker(
                 out_exr = str(img_path).rsplit(".", 1)[0] + ".exr"
 
             _write_exr(Path(out_exr), acescg_rgb, ACESCG_OCIO_SPACE)
-
-            if input_is_exr:
-                return True, None
 
             srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
             _write_srgb_png(img_path, _sfm_proxy_display_rgb(srgb_linear))
@@ -415,5 +480,67 @@ def process_image_color_worker(
             return True, None
 
         return False, f"Unknown destination: {dest_space}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def convert_frame_to_srgb_proxy_worker(
+    img_path_str: str,
+    source_space: str,
+    dest_space: str | None = None,
+    cs_in: str | None = None,
+    cs_out: str | None = None,
+    colorconfig_path: str | None = None,
+) -> tuple[bool, str | None]:
+    """Convert a raw extracted frame (16-bit PNG) to a tone-mapped sRGB proxy PNG for SfM."""
+    try:
+        img_path = Path(img_path_str)
+        linear_rgb, src_prim = _get_linear_rgb_and_primaries(
+            img_path, source_space, dest_space, cs_in, cs_out, colorconfig_path
+        )
+        srgb_linear = _gamut_convert(linear_rgb, src_prim, "srgb")
+        _write_srgb_png(img_path, _sfm_proxy_display_rgb(srgb_linear))
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def convert_frame_to_output_exr_worker(
+    img_path_str: str,
+    exr_out_path_str: str,
+    source_space: str,
+    dest_space: str,
+    cs_in: str | None = None,
+    cs_out: str | None = None,
+    colorconfig_path: str | None = None,
+) -> tuple[bool, str | None]:
+    """Convert a raw extracted frame (16-bit PNG) to an EXR in the user's output color space."""
+    try:
+        img_path = Path(img_path_str)
+        exr_out = Path(exr_out_path_str)
+        
+        linear_rgb, src_prim = _get_linear_rgb_and_primaries(
+            img_path, source_space, dest_space, cs_in, cs_out, colorconfig_path
+        )
+
+        if dest_space == "Custom OCIO...":
+            if not HAS_OCIO:
+                return False, "OCIO Error: Not installed"
+            _write_exr(exr_out, linear_rgb, cs_out or "")
+            return True, None
+
+        if dest_space == "ACEScg (EXR + sRGB PNG)":
+            out_rgb = _gamut_convert(linear_rgb, src_prim, "acescg")
+            _write_exr(exr_out, out_rgb, ACESCG_OCIO_SPACE)
+        elif dest_space == "Linear sRGB":
+            out_rgb = _gamut_convert(linear_rgb, src_prim, "srgb")
+            _write_exr(exr_out, out_rgb, "Linear")
+        elif dest_space == "sRGB (Tone Mapped)":
+            srgb_lin = _gamut_convert(linear_rgb, src_prim, "srgb")
+            _write_exr(exr_out, srgb_lin, "Linear")
+        else:
+            out_space = source_space if source_space.startswith("Linear") else f"Linear {source_space}"
+            _write_exr(exr_out, linear_rgb, out_space)
+        return True, None
     except Exception as exc:
         return False, str(exc)

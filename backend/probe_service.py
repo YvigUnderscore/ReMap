@@ -21,6 +21,9 @@ FFPROBE_TO_SOURCE = {
     ("bt709", "linear"): "Linear sRGB",
     ("bt709", "iec61966-2-1"): "sRGB (Rec.709)",
     ("bt709", "srgb"): "sRGB (Rec.709)",
+    # Sony S-Log 3 / S-Gamut 3 (ffprobe reports bt2020 primaries + unknown/slog3 TRC)
+    ("bt2020", "unknown"): "S-Log 3 (S-Gamut 3)",
+    ("bt2020", "slog3"): "S-Log 3 (S-Gamut 3)",
 }
 
 COLOR_SOURCES = [
@@ -31,6 +34,7 @@ COLOR_SOURCES = [
     "Linear sRGB",
     "sRGB (Rec.709)",
     "HLG (BT.2020)",
+    "S-Log 3 (S-Gamut 3)",
 ]
 
 COLOR_DESTINATIONS = [

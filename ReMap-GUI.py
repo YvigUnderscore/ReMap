@@ -17,7 +17,7 @@ from tqdm import tqdm as _original_tqdm
 import cv2
 import numpy as np
 from PIL import Image
-from backend.color_conversion_worker import process_image_color_worker
+from backend.color_conversion_worker import process_image_color_worker, convert_frame_to_srgb_proxy_worker, convert_frame_to_output_exr_worker
 from backend.bundle_postprocess import normalize_final_bundle
 from backend.frame_filter import reject_low_quality_frames
 
@@ -38,6 +38,7 @@ COLOR_SOURCES = [
     "Linear sRGB",
     "sRGB (Rec.709)",
     "HLG (BT.2020)",
+    "S-Log 3 (S-Gamut 3)",
 ]
 
 # Destination profiles: where we want to go
@@ -59,6 +60,8 @@ _FFPROBE_TO_SOURCE = {
     ("bt709", "linear"):            "Linear sRGB",
     ("bt709", "iec61966-2-1"):      "sRGB (Rec.709)",
     ("bt709", "srgb"):              "sRGB (Rec.709)",
+    ("bt2020", "unknown"):          "S-Log 3 (S-Gamut 3)",
+    ("bt2020", "slog3"):            "S-Log 3 (S-Gamut 3)",
 }
 
 # --- Gamut Matrices (computed from CIE XYZ with Bradford D65↔D60 adaptation) ---
@@ -2813,8 +2816,62 @@ class SfMApp(ctk.CTk):
                     total_imgs = len([f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
                     self._log_tagged(accel_tag, f"       ✓ Extraction complete — {total_imgs} images total")
 
-            # --- 1.5 COLOR CONVERSION ---
-            if self.color_enabled.get():
+            # --- 1.5 COLOR CONVERSION (SfM proxy) ---
+            if self.color_enabled.get() and is_video_mode:
+                # Video mode with color conversion: convert extracted frames
+                # to tone-mapped sRGB PNGs so SfM operates on display-referred
+                # images.  The actual output conversion (EXR) happens after SfM.
+                color_step_idx = 1
+                GUIProgressTqdm._step_index = color_step_idx
+                GUIProgressTqdm._step_name = "Color → sRGB proxy"
+                _source = self.color_source.get()
+                if _source == "Auto-detect":
+                    _source = self.detected_color_profile.get()
+                    if not _source:
+                        _source = "Linear BT.2020"
+                        self._log_tagged("[CPU]", f"       ⚠ No color profile detected, assuming {_source}")
+                self._log_tagged("[CPU]", f"[{color_step_idx+1}/{len(self.STEPS)}] Converting frames to sRGB proxy for SfM ({_source} → sRGB)...")
+                exts_proxy = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
+                proxy_images = sorted([
+                    p for p in images_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in exts_proxy
+                ])
+                if proxy_images:
+                    try:
+                        configured_threads = int(self.num_workers.get())
+                    except Exception:
+                        configured_threads = 1
+                    threads = max(1, configured_threads)
+                    self._log_tagged("[CPU]", f"       → Converting {len(proxy_images)} frames with {threads} process(es)...")
+                    from concurrent.futures import ProcessPoolExecutor, as_completed
+                    from concurrent.futures.process import BrokenProcessPool
+                    _proxy_ok = 0
+                    _proxy_errs = []
+                    try:
+                        with ProcessPoolExecutor(max_workers=threads) as executor:
+                            _futs = [
+                                executor.submit(convert_frame_to_srgb_proxy_worker, str(p), _source, self.color_dest.get(), self.ocio_in_cs.get(), self.ocio_out_cs.get(), self.ocio_path.get())
+                                for p in proxy_images
+                            ]
+                            for fut in as_completed(_futs):
+                                if self._cancelled:
+                                    executor.shutdown(wait=False, cancel_futures=True)
+                                    break
+                                try:
+                                    ok, err = fut.result()
+                                except (BrokenProcessPool, Exception) as e:
+                                    ok, err = False, str(e)
+                                if ok:
+                                    _proxy_ok += 1
+                                elif err:
+                                    _proxy_errs.append(err)
+                    except BrokenProcessPool as e:
+                        _proxy_errs.append(f"Worker pool crashed: {e}")
+                    if _proxy_errs:
+                        self._log_tagged("[CPU]", f"       ❌ {len(_proxy_errs)} proxy conversion error(s): {list(set(_proxy_errs))[:3]}")
+                    self._log_tagged("[CPU]", f"       ✓ {_proxy_ok}/{len(proxy_images)} frames converted to sRGB proxy")
+            elif self.color_enabled.get() and not is_video_mode and not is_stray_mode:
+                # Image mode: apply color conversion in-place (legacy behavior)
                 color_step_idx = 1
                 GUIProgressTqdm._step_index = color_step_idx
                 GUIProgressTqdm._step_name = "Color Conversion"
@@ -2942,10 +2999,144 @@ class SfMApp(ctk.CTk):
                 )
                 self._log_tagged(sfm_tag, "       ✓ Reconstruction complete")
 
+                # ── Post-SfM: EXR output conversion (video mode + color enabled) ──
+                if self.color_enabled.get() and is_video_mode:
+                    self._check_cancelled()
+                    _dest = self.color_dest.get()
+                    _source = self.color_source.get()
+                    if _source == "Auto-detect":
+                        _source = self.detected_color_profile.get() or "Linear BT.2020"
+                    
+                    _cs_in = self.ocio_in_cs.get() if _dest == "Custom OCIO..." else None
+                    _cs_out = self.ocio_out_cs.get() if _dest == "Custom OCIO..." else None
+                    _cfg_path = self.ocio_path.get() if _dest == "Custom OCIO..." else None
+                    
+                    self._log_tagged("[CPU]", f"\n       ── Post-SfM: Re-extracting frames & converting to output EXR ({_source} → {_dest}) ──")
+
+                    # Create final output directory for EXR files
+                    ds_final = base_out / f"{base_out.name}_SfM_Dataset_Output"
+                    ds_final_images = ds_final / "images"
+                    ds_final_images.mkdir(parents=True, exist_ok=True)
+
+                    # Re-extract the same sub-sampled frames from video as 16-bit PNGs
+                    # into a temporary directory, then convert each to the output EXR.
+                    with tempfile.TemporaryDirectory() as _raw_tmpdir:
+                        _raw_tmp = Path(_raw_tmpdir)
+                        videos = self.video_paths
+                        for vid_idx, video in enumerate(videos, start=1):
+                            self._check_cancelled()
+                            prefix = f"vid{vid_idx:02d}"
+                            vid_info = next((info for info in self._video_infos if info["path"] == str(video)), None)
+                            native_fps = vid_info["native_fps"] if vid_info else 30.0
+                            target_fps = max(float(self.fps_extract.get()), 0.01)
+                            step = max(1, round(native_fps / target_fps))
+                            vf_filter = f"select='not(mod(n\\,{step}))',setpts=N/FRAME_RATE/TB"
+                            vf_args = ["-vf", vf_filter, "-vsync", "vfr"] if step > 1 else []
+                            cmd_raw = [
+                                "ffmpeg", "-y",
+                                "-i", str(video),
+                                *vf_args,
+                                "-pix_fmt", "rgb48be",
+                                str(_raw_tmp / f"{prefix}_%04d.png")
+                            ]
+                            self._log_tagged("[CPU]", f"       Re-extracting {video.name} (16-bit raw, step={step})...")
+                            proc, stderr_lines, reader_thread = self._run_ffmpeg_streamed(cmd_raw, "[CPU]")
+                            while proc.poll() is None:
+                                if self._cancelled:
+                                    proc.kill()
+                                    proc.wait()
+                                    reader_thread.join(timeout=2)
+                                    raise CancelledError("Processing cancelled by user")
+                                time.sleep(0.25)
+                            reader_thread.join(timeout=5)
+                            if proc.returncode != 0:
+                                self._log_tagged("[ERR]", f"       FFmpeg re-extraction failed for {video.name}")
+                                continue
+
+                        # Collect all re-extracted raw frames
+                        raw_frames = sorted([
+                            p for p in _raw_tmp.iterdir()
+                            if p.is_file() and p.suffix.lower() == ".png"
+                        ])
+                        self._log_tagged("[CPU]", f"       → {len(raw_frames)} raw frames re-extracted for EXR conversion")
+
+                        # Match raw frames to the SfM proxy frames by sorted order
+                        sfm_proxy_frames = sorted([
+                            p for p in images_dir.iterdir()
+                            if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg")
+                        ])
+
+                        # Convert each raw frame to the output color space as EXR
+                        try:
+                            configured_threads = int(self.num_workers.get())
+                        except Exception:
+                            configured_threads = 1
+                        threads = max(1, configured_threads)
+                        self._log_tagged("[CPU]", f"       → Converting {len(raw_frames)} frames to {_dest} EXR with {threads} process(es)...")
+                        from concurrent.futures import ProcessPoolExecutor, as_completed
+                        from concurrent.futures.process import BrokenProcessPool
+                        _exr_ok = 0
+                        _exr_errs = []
+                        # Build mapping: raw frame -> EXR output path (using SfM proxy name)
+                        _exr_tasks = []
+                        for idx, raw_path in enumerate(raw_frames):
+                            if idx < len(sfm_proxy_frames):
+                                exr_name = sfm_proxy_frames[idx].stem + ".exr"
+                            else:
+                                exr_name = raw_path.stem + ".exr"
+                            exr_out = ds_final_images / exr_name
+                            _exr_tasks.append((str(raw_path), str(exr_out), _source, _dest, _cs_in, _cs_out, _cfg_path))
+                        try:
+                            with ProcessPoolExecutor(max_workers=threads) as executor:
+                                _futs = [
+                                    executor.submit(convert_frame_to_output_exr_worker, *args)
+                                    for args in _exr_tasks
+                                ]
+                                for fut in as_completed(_futs):
+                                    if self._cancelled:
+                                        executor.shutdown(wait=False, cancel_futures=True)
+                                        break
+                                    try:
+                                        ok, err = fut.result()
+                                    except (BrokenProcessPool, Exception) as e:
+                                        ok, err = False, str(e)
+                                    if ok:
+                                        _exr_ok += 1
+                                    elif err:
+                                        _exr_errs.append(err)
+                        except BrokenProcessPool as e:
+                            _exr_errs.append(f"Worker pool crashed: {e}")
+                        if _exr_errs:
+                            self._log_tagged("[CPU]", f"       ❌ {len(_exr_errs)} EXR conversion error(s): {list(set(_exr_errs))[:3]}")
+                        self._log_tagged("[CPU]", f"       ✓ {_exr_ok}/{len(raw_frames)} EXR files written to {ds_final_images}")
+
+                    # Update images.bin in sparse model: rename .png -> .exr
+                    try:
+                        from backend.colmap_images import read_images_bin as _read_images_bin, write_images_bin as _write_images_bin
+                        _bin_path = sfm_dir / "images.bin"
+                        if _bin_path.exists():
+                            _images_data = _read_images_bin(_bin_path)
+                            _renamed = 0
+                            for _img in _images_data:
+                                for _ext in (".png", ".jpg", ".jpeg"):
+                                    if _img["name"].lower().endswith(_ext):
+                                        _img["name"] = _img["name"][:-(len(_ext))] + ".exr"
+                                        _renamed += 1
+                                        break
+                            if _renamed > 0:
+                                _write_images_bin(_bin_path, _images_data)
+                                self._log_tagged("[CPU]", f"       → Sparse model updated: {_renamed} image reference(s) renamed to .exr")
+                        else:
+                            self._log_tagged("[CPU]", "       ⚠ images.bin not found in sparse/0")
+                    except Exception as _exc:
+                        self._log_tagged("[CPU]", f"       ⚠ Could not update sparse model image names: {_exc}")
+
+                    self._log_tagged("[CPU]", "       ✓ Post-SfM EXR conversion complete")
+
                 try:
                     normalize_final_bundle(
                         base_out,
-                        keep_srgb_png=True,
+                        keep_srgb_png=self.color_enabled.get() and is_video_mode,
                         use_acescg_exr=self.use_acescg_exr.get(),
                     )
                     self._log_tagged("[CPU]", "       -> Final bundle normalized; images.bin patched")
