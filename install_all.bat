@@ -46,20 +46,42 @@ echo.
 echo Scanning system dependencies...
 
 :: 1. Python
-set PYTHON_CMD=
+set "PYTHON_CMD="
+set "HAS_PYTHON=0"
+set "_PYVER_TMP=%TEMP%\_remap_pyver.tmp"
+
 py -3 --version >nul 2>&1
 if !ERRORLEVEL! equ 0 (
     set "PYTHON_CMD=py -3"
     set "HAS_PYTHON=1"
-) else (
-    python --version 2>nul | findstr /i "Python 3" >nul 2>&1
+)
+
+if !HAS_PYTHON! equ 0 (
+    where python3 >nul 2>&1
     if !ERRORLEVEL! equ 0 (
-        set "PYTHON_CMD=python"
-        set "HAS_PYTHON=1"
-    ) else (
-        set "HAS_PYTHON=0"
+        python3 --version > "!_PYVER_TMP!" 2>&1
+        findstr /i "Python 3" "!_PYVER_TMP!" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            set "PYTHON_CMD=python3"
+            set "HAS_PYTHON=1"
+        )
     )
 )
+
+if !HAS_PYTHON! equ 0 (
+    where python >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        python --version > "!_PYVER_TMP!" 2>&1
+        findstr /i "Python 3" "!_PYVER_TMP!" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            set "PYTHON_CMD=python"
+            set "HAS_PYTHON=1"
+        )
+    )
+)
+
+if exist "!_PYVER_TMP!" del "!_PYVER_TMP!" >nul 2>&1
+
 
 :: 2. Git
 where git >nul 2>&1
@@ -164,41 +186,8 @@ set /p CHOICE="> Select an option: "
 if /i "!CHOICE!"=="Q" exit /b 0
 if /i "!CHOICE!"=="L" goto :launch
 
-if /i "!CHOICE!"=="A" (
-    echo.
-    echo Starting Auto-Install of missing components...
-    if !HAS_PYTHON! equ 0 call :install_python
-    if !HAS_GIT! equ 0 call :install_git
-    if !HAS_FFMPEG! equ 0 call :install_ffmpeg
-    if !HAS_COLMAP! equ 0 call :install_colmap
-    if !HAS_GLOMAP! equ 0 call :install_glomap
-    if !HAS_VENV! equ 0 call :install_venv
-    if !HAS_PIP_REQ! equ 0 call :install_pip
-    if !HAS_SUPERGLUE! equ 0 call :install_superglue
-    if !HAS_NODE! equ 0 call :install_node
-    if !HAS_FRONTEND! equ 0 call :install_frontend
-    if !HAS_CARGO! equ 0 call :install_rust
-    if !HAS_RUST_DEPS! equ 0 call :install_rust_deps
-    goto :scan
-)
-
-if /i "!CHOICE!"=="F" (
-    echo.
-    echo Starting Full Reinstall...
-    call :install_python
-    call :install_git
-    call :install_ffmpeg
-    call :install_colmap
-    call :install_glomap
-    call :install_venv
-    call :install_pip
-    call :install_superglue
-    call :install_node
-    call :install_frontend
-    call :install_rust
-    call :install_rust_deps
-    goto :scan
-)
+if /i "!CHOICE!"=="A" goto :do_auto_install
+if /i "!CHOICE!"=="F" goto :do_full_reinstall
 
 if "!CHOICE!"=="1" call :install_python & goto :scan
 if "!CHOICE!"=="2" call :install_git & goto :scan
@@ -213,6 +202,40 @@ if "!CHOICE!"=="10" call :install_frontend & goto :scan
 if "!CHOICE!"=="11" call :install_rust & call :install_rust_deps & goto :scan
 
 goto :menu
+
+:do_auto_install
+echo.
+echo Starting Auto-Install of missing components...
+if !HAS_PYTHON! equ 0 call :install_python
+if !HAS_GIT! equ 0 call :install_git
+if !HAS_FFMPEG! equ 0 call :install_ffmpeg
+if !HAS_COLMAP! equ 0 call :install_colmap
+if !HAS_GLOMAP! equ 0 call :install_glomap
+if !HAS_VENV! equ 0 call :install_venv
+if !HAS_PIP_REQ! equ 0 call :install_pip
+if !HAS_SUPERGLUE! equ 0 call :install_superglue
+if !HAS_NODE! equ 0 call :install_node
+if !HAS_FRONTEND! equ 0 call :install_frontend
+if !HAS_CARGO! equ 0 call :install_rust
+if !HAS_RUST_DEPS! equ 0 call :install_rust_deps
+goto :scan
+
+:do_full_reinstall
+echo.
+echo Starting Full Reinstall...
+call :install_python
+call :install_git
+call :install_ffmpeg
+call :install_colmap
+call :install_glomap
+call :install_venv
+call :install_pip
+call :install_superglue
+call :install_node
+call :install_frontend
+call :install_rust
+call :install_rust_deps
+goto :scan
 
 
 :: =======================================
@@ -244,11 +267,16 @@ exit /b 0
 :install_python
 echo.
 echo --- [1/11] Python ---
+if !HAS_PYTHON! equ 1 goto :python_already_ok
 echo Python 3.10+ must be installed manually.
 echo Download from: https://www.python.org/downloads/
 echo IMPORTANT: Check "Add python.exe to PATH" during install.
 echo Also disable Microsoft Store aliases in:
 echo   Settings ^> Apps ^> Advanced app settings ^> App execution aliases
+pause
+goto :eof
+:python_already_ok
+echo Python already detected: !PYTHON_CMD!
 pause
 goto :eof
 
@@ -260,26 +288,33 @@ if !ERRORLEVEL! equ 0 (
     echo Installing Git via winget...
     winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
     call :refresh_path
-) else (
-    echo winget not found. Downloading Git installer...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$ProgressPreference = 'SilentlyContinue'; " ^
-        "try { " ^
-        "  $h = @{ 'User-Agent' = 'ReMap-Installer' }; " ^
-        "  $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers $h; " ^
-        "  $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1; " ^
-        "  Write-Host \"  Downloading $($asset.name)...\"; " ^
-        "  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile \"$env:TEMP\git_installer.exe\"; " ^
-        "  Write-Host '  Running installer (silent)...'; " ^
-        "  Start-Process -FilePath \"$env:TEMP\git_installer.exe\" -ArgumentList '/VERYSILENT','/NORESTART','/NOCANCEL','/SP-','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS','/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh' -Wait; " ^
-        "  Remove-Item \"$env:TEMP\git_installer.exe\" -Force; " ^
-        "  Write-Host '  Git installed.'; " ^
-        "} catch { " ^
-        "  Write-Host \"  ERROR: $($_.Exception.Message)\"; " ^
-        "  Write-Host '  Please install Git manually: https://git-scm.com/download/win'; " ^
-        "}"
-    call :refresh_path
+    pause
+    goto :eof
 )
+echo winget not found. Downloading Git installer...
+set "PS_SCRIPT=%TEMP%\remap_install_git.ps1"
+> "!PS_SCRIPT!" echo $ErrorActionPreference = 'Stop'
+>> "!PS_SCRIPT!" echo $ProgressPreference = 'SilentlyContinue'
+>> "!PS_SCRIPT!" echo try {
+>> "!PS_SCRIPT!" echo     $h = @{ 'User-Agent' = 'ReMap-Installer' }
+>> "!PS_SCRIPT!" echo     $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers $h
+>> "!PS_SCRIPT!" echo     $asset = $rel.assets ^| Where-Object { $_.name -match '64-bit\.exe$' } ^| Select-Object -First 1
+>> "!PS_SCRIPT!" echo     if (-not $asset) { throw 'No 64-bit Git installer found' }
+>> "!PS_SCRIPT!" echo     $installer = Join-Path $env:TEMP 'git_installer.exe'
+>> "!PS_SCRIPT!" echo     Write-Host "  Downloading $($asset.name)..."
+>> "!PS_SCRIPT!" echo     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
+>> "!PS_SCRIPT!" echo     Write-Host '  Running installer (silent)...'
+>> "!PS_SCRIPT!" echo     $iArgs = @('/VERYSILENT','/NORESTART','/NOCANCEL','/SP-','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS','/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh')
+>> "!PS_SCRIPT!" echo     Start-Process -FilePath $installer -ArgumentList $iArgs -Wait
+>> "!PS_SCRIPT!" echo     Remove-Item $installer -Force
+>> "!PS_SCRIPT!" echo     Write-Host '  Git installed.'
+>> "!PS_SCRIPT!" echo } catch {
+>> "!PS_SCRIPT!" echo     Write-Host "  ERROR: $($_.Exception.Message)"
+>> "!PS_SCRIPT!" echo     Write-Host '  Please install Git manually: https://git-scm.com/download/win'
+>> "!PS_SCRIPT!" echo }
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"
+del "!PS_SCRIPT!" 2>nul
+call :refresh_path
 pause
 goto :eof
 
@@ -291,34 +326,38 @@ if !ERRORLEVEL! equ 0 (
     echo Installing FFmpeg via winget...
     winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements
     call :refresh_path
-) else (
-    echo winget not found. Downloading FFmpeg...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$ProgressPreference = 'SilentlyContinue'; " ^
-        "try { " ^
-        "  $installDir = Join-Path $env:LOCALAPPDATA 'FFmpeg'; " ^
-        "  $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'; " ^
-        "  $zip = Join-Path $env:TEMP 'ffmpeg.zip'; " ^
-        "  Write-Host '  Downloading FFmpeg essentials build...'; " ^
-        "  Invoke-WebRequest -Uri $url -OutFile $zip; " ^
-        "  Write-Host '  Extracting...'; " ^
-        "  if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }; " ^
-        "  Expand-Archive -Path $zip -DestinationPath $installDir -Force; " ^
-        "  Remove-Item $zip -Force; " ^
-        "  $binDir = Get-ChildItem -Path $installDir -Recurse -Directory -Filter 'bin' | Select-Object -First 1; " ^
-        "  $ffmpegBin = if ($binDir) { $binDir.FullName } else { $installDir }; " ^
-        "  $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); " ^
-        "  if (-not $userPath) { $userPath = '' }; " ^
-        "  if ($userPath -notlike \"*$ffmpegBin*\") { " ^
-        "    [Environment]::SetEnvironmentVariable('PATH', \"$userPath;$ffmpegBin\", 'User'); " ^
-        "  }; " ^
-        "  Write-Host \"  FFmpeg installed to: $ffmpegBin\"; " ^
-        "} catch { " ^
-        "  Write-Host \"  ERROR: $($_.Exception.Message)\"; " ^
-        "  Write-Host '  Please install FFmpeg manually: https://www.gyan.dev/ffmpeg/builds/'; " ^
-        "}"
-    call :refresh_path
+    pause
+    goto :eof
 )
+echo winget not found. Downloading FFmpeg...
+set "PS_SCRIPT=%TEMP%\remap_install_ffmpeg.ps1"
+> "!PS_SCRIPT!" echo $ErrorActionPreference = 'Stop'
+>> "!PS_SCRIPT!" echo $ProgressPreference = 'SilentlyContinue'
+>> "!PS_SCRIPT!" echo $installDir = Join-Path $env:LOCALAPPDATA 'FFmpeg'
+>> "!PS_SCRIPT!" echo try {
+>> "!PS_SCRIPT!" echo     $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+>> "!PS_SCRIPT!" echo     $zip = Join-Path $env:TEMP 'ffmpeg.zip'
+>> "!PS_SCRIPT!" echo     Write-Host '  Downloading FFmpeg essentials build...'
+>> "!PS_SCRIPT!" echo     Invoke-WebRequest -Uri $url -OutFile $zip
+>> "!PS_SCRIPT!" echo     Write-Host '  Extracting...'
+>> "!PS_SCRIPT!" echo     if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
+>> "!PS_SCRIPT!" echo     Expand-Archive -Path $zip -DestinationPath $installDir -Force
+>> "!PS_SCRIPT!" echo     Remove-Item $zip -Force
+>> "!PS_SCRIPT!" echo     $binDir = Get-ChildItem -Path $installDir -Recurse -Directory -Filter 'bin' ^| Select-Object -First 1
+>> "!PS_SCRIPT!" echo     $ffmpegBin = if ($binDir) { $binDir.FullName } else { $installDir }
+>> "!PS_SCRIPT!" echo     $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+>> "!PS_SCRIPT!" echo     if (-not $userPath) { $userPath = '' }
+>> "!PS_SCRIPT!" echo     if ($userPath -notlike "*$ffmpegBin*") {
+>> "!PS_SCRIPT!" echo         [Environment]::SetEnvironmentVariable('PATH', "$userPath;$ffmpegBin", 'User')
+>> "!PS_SCRIPT!" echo     }
+>> "!PS_SCRIPT!" echo     Write-Host "  FFmpeg installed to: $ffmpegBin"
+>> "!PS_SCRIPT!" echo } catch {
+>> "!PS_SCRIPT!" echo     Write-Host "  ERROR: $($_.Exception.Message)"
+>> "!PS_SCRIPT!" echo     Write-Host '  Please install FFmpeg manually: https://www.gyan.dev/ffmpeg/builds/'
+>> "!PS_SCRIPT!" echo }
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"
+del "!PS_SCRIPT!" 2>nul
+call :refresh_path
 pause
 goto :eof
 
