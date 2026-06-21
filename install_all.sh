@@ -9,6 +9,11 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+TARGET_USER="${SUDO_USER:-$USER}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+if [ -n "$TARGET_HOME" ]; then
+    export PATH="$TARGET_HOME/.cargo/bin:$PATH"
+fi
 
 # Check for root
 if [ "$EUID" -ne 0 ]; then 
@@ -18,6 +23,14 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+
+run_as_target_user() {
+    if [ -n "$SUDO_USER" ]; then
+        sudo -u "$TARGET_USER" bash -lc "$1"
+    else
+        bash -lc "$1"
+    fi
+}
 
 scan_system() {
     clear
@@ -35,9 +48,18 @@ scan_system() {
     HAS_VENV=0
     HAS_PIP_REQ=0
     HAS_SUPERGLUE=0
+    HAS_NODE=0
+    HAS_NPM=0
+    HAS_FRONTEND=0
+    HAS_CARGO=0
+    HAS_RUST_DEPS=0
 
     # 1. System packages (basic dev tools)
-    if dpkg -l | grep -q "build-essential" && dpkg -l | grep -q "cmake"; then HAS_PKGS=1; fi
+    if dpkg -l | grep -q "build-essential" \
+        && dpkg -l | grep -q "cmake" \
+        && dpkg -l | grep -q "libwebkit2gtk-4.1-dev"; then
+        HAS_PKGS=1
+    fi
 
     # 2. Git
     if command -v git &> /dev/null; then HAS_GIT=1; fi
@@ -56,13 +78,37 @@ scan_system() {
 
     # 7. Pip requirements
     if [ $HAS_VENV -eq 1 ]; then
-        if sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/python3 -c 'import hloc'" 2>/dev/null; then
+        if run_as_target_user "cd '$SCRIPT_DIR' && .venv/bin/python3 -c 'import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO'" 2>/dev/null; then
             HAS_PIP_REQ=1
         fi
     fi
 
     # 8. SuperGlue
     if [ -d "SuperGluePretrainedNetwork" ]; then HAS_SUPERGLUE=1; fi
+
+    # 9. Node.js 20+ and npm
+    if command -v node &> /dev/null; then
+        NODE_MAJOR="$(node -p "parseInt(process.versions.node.split('.')[0], 10)" 2>/dev/null || echo 0)"
+        if [ "${NODE_MAJOR:-0}" -ge 20 ]; then HAS_NODE=1; fi
+    fi
+    if command -v npm &> /dev/null; then HAS_NPM=1; fi
+
+    # 10. Frontend npm packages
+    if [ $HAS_NODE -eq 1 ] && [ $HAS_NPM -eq 1 ]; then
+        if run_as_target_user "cd '$SCRIPT_DIR' && npm ls --depth=0 >/dev/null 2>&1"; then
+            HAS_FRONTEND=1
+        fi
+    fi
+
+    # 11. Rust/Cargo dependencies for Tauri
+    if run_as_target_user "{ source ~/.cargo/env >/dev/null 2>&1 || true; command -v cargo >/dev/null 2>&1; }"; then
+        HAS_CARGO=1
+    fi
+    if [ $HAS_CARGO -eq 1 ]; then
+        if run_as_target_user "cd '$SCRIPT_DIR' && { source ~/.cargo/env >/dev/null 2>&1 || true; cargo metadata --manifest-path src-tauri/Cargo.toml --locked --offline --format-version 1 >/dev/null 2>&1; }"; then
+            HAS_RUST_DEPS=1
+        fi
+    fi
 }
 
 display_menu() {
@@ -95,6 +141,13 @@ display_menu() {
     fmt_item "6" $HAS_VENV "Python venv "
     fmt_item "7" $HAS_PIP_REQ "PIP packages"
     fmt_item "8" $HAS_SUPERGLUE "SuperGlue   "
+    fmt_item "9" $HAS_NODE "Node.js/npm "
+    fmt_item "10" $HAS_FRONTEND "Frontend    "
+    if [ $HAS_CARGO -eq 1 ] && [ $HAS_RUST_DEPS -eq 1 ]; then
+        echo -e "  [11] Tauri/Rust \t: ${GREEN}[OK]${NC}"
+    else
+        echo -e "  [11] Tauri/Rust \t: ${RED}[MISSING]${NC}"
+    fi
 
     echo ""
     echo "  Actions:"
@@ -103,46 +156,49 @@ display_menu() {
     echo "  [L] Launch ReMap GUI"
     echo "  [Q] Quit"
     echo ""
-    echo "  Type 1-8 to reinstall/configure a specific component."
+    echo "  Type 1-11 to reinstall/configure a specific component."
     echo ""
 }
 
 # --- Installation blocks ---
 
 install_pkgs() {
-    echo -e "\n${GREEN}--- [1/8] Build Tools ---${NC}"
+    echo -e "\n${GREEN}--- [1/11] Build Tools ---${NC}"
     apt-get update
     apt-get install -y build-essential cmake ninja-build clang \
+        ca-certificates curl wget file gnupg \
         libboost-all-dev libgoogle-glog-dev libgflags-dev libceres-dev \
         libfreeimage-dev libglew-dev qtbase5-dev libqt5opengl5-dev \
         libflann-dev libopencv-dev libeigen3-dev libmetis-dev \
-        libsqlite3-dev libcgal-dev python3-pip python3-venv
+        libsqlite3-dev libcgal-dev python3-pip python3-venv \
+        libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+        libayatana-appindicator3-dev librsvg2-dev
     read -p "Press Enter to continue..."
 }
 
 install_git() {
-    echo -e "\n${GREEN}--- [2/8] Git ---${NC}"
+    echo -e "\n${GREEN}--- [2/11] Git ---${NC}"
     apt-get update
     apt-get install -y git
     read -p "Press Enter to continue..."
 }
 
 install_ffmpeg() {
-    echo -e "\n${GREEN}--- [3/8] FFmpeg ---${NC}"
+    echo -e "\n${GREEN}--- [3/11] FFmpeg ---${NC}"
     apt-get update
     apt-get install -y ffmpeg
     read -p "Press Enter to continue..."
 }
 
 install_colmap() {
-    echo -e "\n${GREEN}--- [4/8] COLMAP ---${NC}"
+    echo -e "\n${GREEN}--- [4/11] COLMAP ---${NC}"
     apt-get update
     apt-get install -y colmap || echo -e "${YELLOW}COLMAP package not found in repos.${NC}"
     read -p "Press Enter to continue..."
 }
 
 install_glomap() {
-    echo -e "\n${GREEN}--- [5/8] GLOMAP ---${NC}"
+    echo -e "\n${GREEN}--- [5/11] GLOMAP ---${NC}"
     BUILD_DIR=$(mktemp -d)
     if [ ! -d "$BUILD_DIR" ]; then
         echo -e "${RED}Failed to create temporary directory.${NC}"
@@ -167,7 +223,7 @@ install_glomap() {
 }
 
 install_venv() {
-    echo -e "\n${GREEN}--- [6/8] Python Virtual Environment ---${NC}"
+    echo -e "\n${GREEN}--- [6/11] Python Virtual Environment ---${NC}"
     if [ -d ".venv" ]; then
         echo "Removing existing virtual environment..."
         rm -rf .venv
@@ -182,20 +238,37 @@ install_venv() {
 }
 
 install_pip() {
-    echo -e "\n${GREEN}--- [7/8] PIP Packages ---${NC}"
+    echo -e "\n${GREEN}--- [7/11] PIP Packages ---${NC}"
     if [ ! -d ".venv" ]; then
         echo -e "${RED}ERROR: Virtual environment missing. Install it first.${NC}"
         read -p "Press Enter to continue..."
         return
     fi
+    PIP_LOG_DIR="$SCRIPT_DIR/backend_state/install_logs"
+    PIP_LOG="$PIP_LOG_DIR/pip_install.log"
+    mkdir -p "$PIP_LOG_DIR"
+    touch "$PIP_LOG"
+    if [ -n "$SUDO_USER" ]; then
+        chown -R "$TARGET_USER":"$TARGET_USER" "$PIP_LOG_DIR"
+    fi
+    echo "Writing pip install log to: $PIP_LOG"
+    echo "==== ReMap pip install $(date) ====" > "$PIP_LOG"
     echo "Installing/Upgrading pip requirements..."
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install --upgrade pip"
-    sudo -u ${SUDO_USER:-$USER} bash -c ".venv/bin/pip install -r requirements.txt"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --upgrade pip 2>&1 | tee -a '$PIP_LOG'"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install -r requirements.txt 2>&1 | tee -a '$PIP_LOG'"
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --ignore-requires-python dataclasses==0.8 2>&1 | tee -a '$PIP_LOG'"
+    echo "Installing pinned LoMa from official repository (--no-deps; dependencies are pinned in requirements.txt)..."
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/pip install --no-deps --force-reinstall 'git+https://github.com/davnords/LoMa.git@9105854833f55d18194d0505d913f0a74b194ef0#egg=lomatch' 2>&1 | tee -a '$PIP_LOG'"
+    echo "Verifying Python dependency consistency..."
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/python3 -m pip check 2>&1 | tee -a '$PIP_LOG'"
+    echo "Verifying required imports..."
+    run_as_target_user "cd '$SCRIPT_DIR' && set -o pipefail && .venv/bin/python3 -c 'import cv2, hloc, kornia, loma, numpy, psutil, pycolmap, torch, torchvision; import flask, matplotlib, PIL, requests, scipy, tqdm; import OpenImageIO' 2>&1 | tee -a '$PIP_LOG'"
+    echo "PIP packages installed and verified successfully."
     read -p "Press Enter to continue..."
 }
 
 install_superglue() {
-    echo -e "\n${GREEN}--- [8/8] SuperGluePretrainedNetwork ---${NC}"
+    echo -e "\n${GREEN}--- [8/11] SuperGluePretrainedNetwork ---${NC}"
     if command -v git &> /dev/null; then
         if [ -d "SuperGluePretrainedNetwork" ]; then
             echo "Removing existing SuperGlue repository..."
@@ -206,6 +279,79 @@ install_superglue() {
     else
         echo -e "${RED}ERROR: Git must be installed first.${NC}"
     fi
+    read -p "Press Enter to continue..."
+}
+
+install_node() {
+    echo -e "\n${GREEN}--- [9/11] Node.js / npm ---${NC}"
+    if command -v node &> /dev/null; then
+        NODE_MAJOR="$(node -p "parseInt(process.versions.node.split('.')[0], 10)" 2>/dev/null || echo 0)"
+        if [ "${NODE_MAJOR:-0}" -ge 20 ] && command -v npm &> /dev/null; then
+            echo "Node.js/npm is already available."
+            read -p "Press Enter to continue..."
+            return
+        fi
+    fi
+
+    echo "Installing Node.js 24 LTS via NodeSource..."
+    apt-get update
+    apt-get install -y ca-certificates curl gnupg
+    mkdir -p /etc/apt/keyrings
+    rm -f /etc/apt/keyrings/nodesource.gpg
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list
+    apt-get update
+    apt-get install -y nodejs
+    read -p "Press Enter to continue..."
+}
+
+install_frontend() {
+    echo -e "\n${GREEN}--- [10/11] Frontend Packages ---${NC}"
+    if ! command -v node &> /dev/null || ! command -v npm &> /dev/null; then
+        echo "Node.js/npm is missing. Installing Node.js first..."
+        install_node
+    fi
+    if ! command -v npm &> /dev/null; then
+        echo -e "${RED}ERROR: npm is still missing. Install Node.js 20+ and rerun this option.${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    NODE_MAJOR="$(node -p "parseInt(process.versions.node.split('.')[0], 10)" 2>/dev/null || echo 0)"
+    if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+        echo -e "${RED}ERROR: Node.js 20+ is required. Current major version: ${NODE_MAJOR:-unknown}.${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    if [ -f "package-lock.json" ]; then
+        run_as_target_user "cd '$SCRIPT_DIR' && npm ci"
+    else
+        run_as_target_user "cd '$SCRIPT_DIR' && npm install"
+    fi
+    read -p "Press Enter to continue..."
+}
+
+install_rust() {
+    echo -e "\n${GREEN}--- [11/11] Rust Toolchain ---${NC}"
+    if run_as_target_user "{ source ~/.cargo/env >/dev/null 2>&1 || true; command -v cargo >/dev/null 2>&1; }"; then
+        echo "Rust/Cargo is already available."
+        read -p "Press Enter to continue..."
+        return
+    fi
+    apt-get update
+    apt-get install -y curl build-essential
+    run_as_target_user "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env && rustup default stable"
+    read -p "Press Enter to continue..."
+}
+
+install_rust_deps() {
+    echo -e "\n${GREEN}--- [11/11] Tauri / Cargo Dependencies ---${NC}"
+    if ! run_as_target_user "{ source ~/.cargo/env >/dev/null 2>&1 || true; command -v cargo >/dev/null 2>&1; }"; then
+        echo "Cargo is missing. Installing Rust first..."
+        install_rust
+    fi
+    run_as_target_user "cd '$SCRIPT_DIR' && { source ~/.cargo/env >/dev/null 2>&1 || true; cargo fetch --manifest-path src-tauri/Cargo.toml --locked; }"
     read -p "Press Enter to continue..."
 }
 
@@ -255,6 +401,10 @@ while true; do
             if [ $HAS_VENV -eq 0 ]; then install_venv; fi
             if [ $HAS_PIP_REQ -eq 0 ]; then install_pip; fi
             if [ $HAS_SUPERGLUE -eq 0 ]; then install_superglue; fi
+            if [ $HAS_NODE -eq 0 ]; then install_node; fi
+            if [ $HAS_FRONTEND -eq 0 ]; then install_frontend; fi
+            if [ $HAS_CARGO -eq 0 ]; then install_rust; fi
+            if [ $HAS_RUST_DEPS -eq 0 ]; then install_rust_deps; fi
             ;;
         [Ff])
             install_pkgs
@@ -267,6 +417,10 @@ while true; do
             install_venv
             install_pip
             install_superglue
+            install_node
+            install_frontend
+            install_rust
+            install_rust_deps
             ;;
         1) install_pkgs ;;
         2) install_git ;;
@@ -276,6 +430,9 @@ while true; do
         6) install_venv ;;
         7) install_pip ;;
         8) install_superglue ;;
+        9) install_node ;;
+        10) install_frontend ;;
+        11) install_rust; install_rust_deps ;;
         *) ;;
     esac
 done

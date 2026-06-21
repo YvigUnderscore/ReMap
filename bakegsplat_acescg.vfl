@@ -1,0 +1,152 @@
+// ==========================================================================
+// Bake Gaussian Splatting (.ply in ACEScg) for Houdini / Octane
+// ==========================================================================
+// Handles .ply files where the SH coefficients were trained in ACEScg.
+// Uses OCIO to derive the correct conversion matrix at runtime,
+// ensuring compatibility with whatever scene_linear your config defines.
+// ==========================================================================
+
+// --- Detect attribute layout ---
+int vectorform = 1;
+if (haspointattrib(geoself(), "f_dc_0"))
+    vectorform = 0;
+
+// --- Read the DC (band-0) SH coefficients ---
+vector f_dc;
+if (vectorform)
+    f_dc = v@f_dc;
+else
+    f_dc = set(@f_dc_0, @f_dc_1, @f_dc_2);
+
+// ==========================================================================
+// COLOR SPACE CONVERSION: ACEScg -> scene_linear
+// ==========================================================================
+// We derive the 3x3 conversion matrix from OCIO by probing basis vectors.
+// This guarantees correctness regardless of your OCIO config:
+//   - If scene_linear = ACEScg  -> matrix is identity, no change
+//   - If scene_linear = lin_sRGB -> matrix does the proper gamut conversion
+//
+// We use chs("inputcolorspace") so you can set "ACEScg" (or any valid
+// OCIO name) via a spare parameter on the node.
+// Fallback: hardcoded "ACEScg" if the parameter doesn't exist.
+
+string src_space = "ACEScg";
+if (chsexist("inputcolorspace"))
+    src_space = chs("inputcolorspace");
+
+string dst_space = "scene_linear";
+
+// Derive the 3x3 matrix by transforming the RGB basis vectors.
+// Since both spaces are linear, OCIO will only apply a matrix internally,
+// so this is mathematically exact and safe for SH coefficients.
+vector col_r = ocio_transform(src_space, dst_space, set(1.0, 0.0, 0.0));
+vector col_g = ocio_transform(src_space, dst_space, set(0.0, 1.0, 0.0));
+vector col_b = ocio_transform(src_space, dst_space, set(0.0, 0.0, 1.0));
+
+// Build the matrix for VEX row-vector convention: v_out = v_in * M
+// Each COLUMN of M should be the transform of the corresponding basis.
+// In VEX set() fills row-major, and v*M reads columns, so we store
+// the transformed bases as ROWS (transposed from column-vector convention).
+matrix3 colormatrix = set(
+    col_r.x, col_g.x, col_b.x,
+    col_r.y, col_g.y, col_b.y,
+    col_r.z, col_g.z, col_b.z
+);
+
+// --- Convert DC term ---
+vector f_dc_converted = f_dc * colormatrix;
+
+// --- Compute Cd from first band of SH ---
+float SH_C0 = 0.28209479177387814;
+@Cd = f_dc_converted * SH_C0 + 0.5;
+
+// ==========================================================================
+// Gaussian Splat specific attributes
+// ==========================================================================
+if (chi("outputgsplat"))
+{
+    // --- Quaternion orientation ---
+    if (vectorform)
+        p@orient = normalize(p@rot);
+    else
+        p@orient = normalize(set(@rot_1, @rot_2, @rot_3, @rot_0));
+
+    // --- Alpha (sigmoid conversion) ---
+    f@GS_Alpha = 1 / (1 + exp(-@opacity));
+
+    // --- Scale (convert from log-form) ---
+    if (vectorform)
+        v@scale = exp(v@scale);
+    else
+        v@scale = set(exp(@scale_0), exp(@scale_1), exp(@scale_2));
+
+    // --- SPH Coefficients: convert ALL bands through the color matrix ---
+    if (chi("outputsphcoeff") && haspointattrib(geoself(), "f_rest_44"))
+    {
+        // Gather rest coefficients per channel.
+        // Layout: R[0..14], G[0..14], B[0..14] (15 coefficients each).
+        float rest_r[], rest_g[], rest_b[];
+
+        if (vectorform)
+        {
+            float f_rest[] = f[]@f_rest;
+            for (int i = 0; i < 15; i++)
+            {
+                rest_r[i] = f_rest[i];
+                rest_g[i] = f_rest[i + 15];
+                rest_b[i] = f_rest[i + 30];
+            }
+        }
+        else
+        {
+            rest_r[0]  = @f_rest_0;  rest_g[0]  = @f_rest_15; rest_b[0]  = @f_rest_30;
+            rest_r[1]  = @f_rest_1;  rest_g[1]  = @f_rest_16; rest_b[1]  = @f_rest_31;
+            rest_r[2]  = @f_rest_2;  rest_g[2]  = @f_rest_17; rest_b[2]  = @f_rest_32;
+            rest_r[3]  = @f_rest_3;  rest_g[3]  = @f_rest_18; rest_b[3]  = @f_rest_33;
+            rest_r[4]  = @f_rest_4;  rest_g[4]  = @f_rest_19; rest_b[4]  = @f_rest_34;
+            rest_r[5]  = @f_rest_5;  rest_g[5]  = @f_rest_20; rest_b[5]  = @f_rest_35;
+            rest_r[6]  = @f_rest_6;  rest_g[6]  = @f_rest_21; rest_b[6]  = @f_rest_36;
+            rest_r[7]  = @f_rest_7;  rest_g[7]  = @f_rest_22; rest_b[7]  = @f_rest_37;
+            rest_r[8]  = @f_rest_8;  rest_g[8]  = @f_rest_23; rest_b[8]  = @f_rest_38;
+            rest_r[9]  = @f_rest_9;  rest_g[9]  = @f_rest_24; rest_b[9]  = @f_rest_39;
+            rest_r[10] = @f_rest_10; rest_g[10] = @f_rest_25; rest_b[10] = @f_rest_40;
+            rest_r[11] = @f_rest_11; rest_g[11] = @f_rest_26; rest_b[11] = @f_rest_41;
+            rest_r[12] = @f_rest_12; rest_g[12] = @f_rest_27; rest_b[12] = @f_rest_42;
+            rest_r[13] = @f_rest_13; rest_g[13] = @f_rest_28; rest_b[13] = @f_rest_43;
+            rest_r[14] = @f_rest_14; rest_g[14] = @f_rest_29; rest_b[14] = @f_rest_44;
+        }
+
+        // Apply color matrix to each (R,G,B) SH triplet
+        float conv_r[], conv_g[], conv_b[];
+        for (int i = 0; i < 15; i++)
+        {
+            vector triplet = set(rest_r[i], rest_g[i], rest_b[i]);
+            vector converted = triplet * colormatrix;
+            conv_r[i] = converted.x;
+            conv_g[i] = converted.y;
+            conv_b[i] = converted.z;
+        }
+
+        // Pack into Matrix4's (DC + 15 higher-order = 16 values each)
+        4@GS_SPH_R = set(
+            f_dc_converted.x, conv_r[0] , conv_r[1] , conv_r[2] ,
+            conv_r[3] , conv_r[4] , conv_r[5] , conv_r[6] ,
+            conv_r[7] , conv_r[8] , conv_r[9] , conv_r[10],
+            conv_r[11], conv_r[12], conv_r[13], conv_r[14] );
+
+        4@GS_SPH_G = set(
+            f_dc_converted.y, conv_g[0] , conv_g[1] , conv_g[2] ,
+            conv_g[3] , conv_g[4] , conv_g[5] , conv_g[6] ,
+            conv_g[7] , conv_g[8] , conv_g[9] , conv_g[10],
+            conv_g[11], conv_g[12], conv_g[13], conv_g[14] );
+
+        4@GS_SPH_B = set(
+            f_dc_converted.z, conv_b[0] , conv_b[1] , conv_b[2] ,
+            conv_b[3] , conv_b[4] , conv_b[5] , conv_b[6] ,
+            conv_b[7] , conv_b[8] , conv_b[9] , conv_b[10],
+            conv_b[11], conv_b[12], conv_b[13], conv_b[14] );
+
+        // Store original orientation for SPH evaluation on rotated particles
+        p@restorient = p@orient;
+    }
+}

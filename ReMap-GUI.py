@@ -11,12 +11,15 @@ import tempfile
 from pathlib import Path
 import os
 import logging
+import math
 import time
 from tqdm import tqdm as _original_tqdm
 import cv2
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
+from backend.color_conversion_worker import process_image_color_worker, convert_frame_to_srgb_proxy_worker, convert_frame_to_output_exr_worker
+from backend.bundle_postprocess import normalize_final_bundle
+from backend.frame_filter import reject_low_quality_frames
 
 try:
     import OpenImageIO as oiio
@@ -30,10 +33,12 @@ except ImportError:
 COLOR_SOURCES = [
     "Auto-detect",
     "Linear BT.2020",
+    "Linear ACEScg",
     "Apple Log (BT.2020)",
     "Linear sRGB",
     "sRGB (Rec.709)",
     "HLG (BT.2020)",
+    "S-Log 3 (S-Gamut 3)",
 ]
 
 # Destination profiles: where we want to go
@@ -44,6 +49,8 @@ COLOR_DESTINATIONS = [
     "Custom OCIO...",
 ]
 
+ACESCG_OCIO_SPACE = "ACES - ACEScg"
+
 # ffprobe metadata → source profile mapping
 _FFPROBE_TO_SOURCE = {
     ("bt2020", "linear"):           "Linear BT.2020",
@@ -53,6 +60,8 @@ _FFPROBE_TO_SOURCE = {
     ("bt709", "linear"):            "Linear sRGB",
     ("bt709", "iec61966-2-1"):      "sRGB (Rec.709)",
     ("bt709", "srgb"):              "sRGB (Rec.709)",
+    ("bt2020", "unknown"):          "S-Log 3 (S-Gamut 3)",
+    ("bt2020", "slog3"):            "S-Log 3 (S-Gamut 3)",
 }
 
 # --- Gamut Matrices (computed from CIE XYZ with Bradford D65↔D60 adaptation) ---
@@ -156,7 +165,7 @@ def _aces_tonemap(x):
 
 def _linearize(rgb_norm, source):
     """Apply the correct EOTF based on source profile → scene-linear RGB."""
-    if source in ("Linear BT.2020", "Linear sRGB"):
+    if source in ("Linear BT.2020", "Linear ACEScg", "Linear sRGB"):
         return rgb_norm  # already linear
     elif source == "Apple Log (BT.2020)":
         return _apple_log_to_linear(rgb_norm)
@@ -171,6 +180,8 @@ def _source_primaries(source):
     """Return 'bt2020' or 'srgb' for a given source profile."""
     if source in ("Linear BT.2020", "Apple Log (BT.2020)", "HLG (BT.2020)"):
         return "bt2020"
+    if source == "Linear ACEScg":
+        return "acescg"
     return "srgb"
 
 
@@ -193,6 +204,7 @@ def _gamut_convert(rgb_linear, src_primaries, dst_primaries):
 try:
     import torch
     from hloc import extract_features, match_features, reconstruction, pairs_from_exhaustive
+    from backend.loma_matcher import LoMaMatcher, is_loma_matcher, loma_feature_path, loma_matches_path
     import pycolmap
     from sfm_runner import run_sfm_with_live_export
     from stray_to_colmap import convert_stray_to_colmap
@@ -233,11 +245,20 @@ def generate_sequential_pairs(image_dir, pairs_path, overlap=10):
             pairs.append((images[i], images[j]))
     with open(pairs_path, 'w') as f:
         f.writelines(' '.join(p) + '\n' for p in pairs)
+    return len(pairs)
+
+
+def count_pairs_file(pairs_path):
+    try:
+        with open(pairs_path, "r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except Exception:
+        return 0
 
 
 def _process_image_color_worker(img_path_str, source_space, dest_space, cs_in, cs_out, colorconfig_path, exr_out_dir_str):
     """
-    Modular color conversion worker for ProcessPoolExecutor.
+    Modular color conversion worker for parallel executors.
 
     Pipeline:  Read → Normalize → Linearize (EOTF) → Gamut Matrix → Encode → Write
 
@@ -304,6 +325,7 @@ def _process_image_color_worker(img_path_str, source_space, dest_space, cs_in, c
 
             if HAS_OCIO:
                 spec_exr = oiio.ImageSpec(w, h, ch, oiio.FLOAT)
+                spec_exr.attribute("oiio:ColorSpace", ACESCG_OCIO_SPACE)
                 buf_exr = oiio.ImageBuf(spec_exr)
                 buf_exr.set_pixels(oiio.ROI(), acescg_rgb)
                 buf_exr.write(out_exr)
@@ -413,7 +435,10 @@ class GUIProgressTqdm(_original_tqdm):
             step_i = GUIProgressTqdm._step_index
             total_steps = len(app.STEPS)
             overall = (step_i + pct) / total_steps
-            text = f"Step {step_i + 1}/{total_steps} — {GUIProgressTqdm._step_name}  ({self.n}/{self.total})"
+            text = (
+                f"Step {step_i + 1}/{total_steps} — {GUIProgressTqdm._step_name}  "
+                f"({self.n}/{self.total}, {pct * 100:.0f}%)"
+            )
             app.after(0, lambda: app.step_label.configure(text=text, text_color=COLORS["accent_blue"]))
             app.after(0, lambda: app.progress_bar.set(overall))
 
@@ -641,6 +666,7 @@ class SfMApp(ctk.CTk):
         self.ocio_path = ctk.StringVar(value=os.environ.get("OCIO", ""))
         self.ocio_in_cs = ctk.StringVar(value="")
         self.ocio_out_cs = ctk.StringVar(value="")
+        self.use_acescg_exr = ctk.BooleanVar(value=True)
         self.ocio_spaces = []
         self.has_ocio_lib = HAS_OCIO
         # Input probing data (for frame count estimates)
@@ -652,7 +678,7 @@ class SfMApp(ctk.CTk):
         self._dash_stats = {"images": 0, "features": 0, "matches": 0, "points3d": 0}
 
         # Worker configuration
-        default_workers = min(multiprocessing.cpu_count(), 16)
+        default_workers = multiprocessing.cpu_count()
         self.num_workers = ctk.IntVar(value=default_workers)
         self.workers_label_var = ctk.StringVar(value=f"{default_workers} Threads")
 
@@ -850,6 +876,14 @@ class SfMApp(ctk.CTk):
                       progress_color=COLORS["accent_blue"],
                       button_color=COLORS["text_primary"]).pack(side="right")
 
+        exr_row = ctk.CTkFrame(self.card_stray.content, fg_color="transparent")
+        exr_row.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(exr_row, text="Generate / patch ACEScg EXR output",
+                     text_color=COLORS["text_secondary"], font=ctk.CTkFont(size=13)).pack(side="left")
+        ctk.CTkSwitch(exr_row, variable=self.use_acescg_exr, text="", width=46,
+                      progress_color=COLORS["accent_purple"],
+                      button_color=COLORS["text_primary"]).pack(side="right")
+
         ctk.CTkLabel(self.card_stray.content, text="Full SfM: COLMAP recalculates poses. ARKit Poses: uses device odometry directly.",
                      text_color=COLORS["text_muted"], font=ctk.CTkFont(size=11), wraplength=600).pack(anchor="w", pady=(4, 0))
 
@@ -878,7 +912,7 @@ class SfMApp(ctk.CTk):
         grid.columnconfigure(2, minsize=120)
 
         features_list = ["superpoint_aachen", "superpoint_max", "disk", "aliked-n16", "sift"]
-        matchers_list = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam"]
+        matchers_list = ["superpoint+lightglue", "superglue", "disk+lightglue", "adalam", "loma_b", "loma_g"]
         pairing_list = ["Sequential (Video)", "Exhaustive (Small dataset < 200)"]
 
         self._combo_row(grid, "Features", self.feature_type, features_list, row=1, col=0)
@@ -1339,8 +1373,8 @@ class SfMApp(ctk.CTk):
                 if not self.ocio_in_cs.get() in self.ocio_spaces:
                     self.ocio_in_cs.set(self.ocio_spaces[0])
                 
-                # Default "ACES - ACEScg" for output
-                default_out = "ACES - ACEScg"
+                # Default ACEScg output to the canonical OCIO colorspace name.
+                default_out = ACESCG_OCIO_SPACE
                 if default_out in self.ocio_spaces:
                     self.ocio_out_cs.set(default_out)
                 elif not self.ocio_out_cs.get() in self.ocio_spaces:
@@ -1475,6 +1509,7 @@ class SfMApp(ctk.CTk):
             self.color_enabled.set(True)
             self.color_source.set("Auto-detect")
             self.color_dest.set("ACEScg (EXR + sRGB PNG)")
+            self.use_acescg_exr.set(True)
             self._on_color_enabled_change()
         else:
             self.input_label_var.set("Image Folder")
@@ -1493,6 +1528,20 @@ class SfMApp(ctk.CTk):
         """Use ffprobe to get video duration, native FPS, and color profile."""
         info = {"path": str(video_path), "duration": 0, "native_fps": 30,
                 "total_frames": 0, "color_profile": ""}
+
+        def _parse_rate(value, default=0.0):
+            try:
+                text = str(value or "").strip()
+                if "/" in text:
+                    num, den = text.split("/", 1)
+                    den_value = float(den)
+                    if den_value > 0:
+                        return float(num) / den_value
+                parsed = float(text)
+                return parsed if parsed > 0 else default
+            except Exception:
+                return default
+
         try:
             cmd = [
                 "ffprobe", "-v", "quiet", "-print_format", "json",
@@ -1506,10 +1555,12 @@ class SfMApp(ctk.CTk):
                 # Find video stream for FPS + color info
                 for s in data.get("streams", []):
                     if s.get("codec_type") == "video":
-                        r = s.get("r_frame_rate", "30/1")
-                        parts = r.split("/")
-                        if len(parts) == 2 and int(parts[1]) > 0:
-                            info["native_fps"] = int(parts[0]) / int(parts[1])
+                        native_fps = _parse_rate(s.get("avg_frame_rate"), 0.0)
+                        if native_fps <= 0:
+                            native_fps = _parse_rate(s.get("r_frame_rate"), 30.0)
+                        info["native_fps"] = native_fps or 30.0
+                        if not info["duration"]:
+                            info["duration"] = float(s.get("duration", 0) or 0)
                         # Detect color profile
                         c_prim = s.get("color_primaries", "").lower()
                         c_trc = s.get("color_transfer", "").lower()
@@ -1517,8 +1568,15 @@ class SfMApp(ctk.CTk):
                         info["color_profile"] = _FFPROBE_TO_SOURCE.get(key, "")
                         info["color_primaries"] = c_prim
                         info["color_transfer"] = c_trc
+                        try:
+                            nb_frames = s.get("nb_frames")
+                            if nb_frames and nb_frames != "N/A":
+                                info["total_frames"] = int(float(nb_frames))
+                        except Exception:
+                            pass
                         break
-                info["total_frames"] = int(info["duration"] * info["native_fps"])
+                if not info["total_frames"] and info["duration"] > 0:
+                    info["total_frames"] = round(info["duration"] * info["native_fps"])
         except Exception:
             pass
         return info
@@ -1576,7 +1634,7 @@ class SfMApp(ctk.CTk):
                         t_end = float(last_line.split(',')[0])
                         duration = t_end - t_start
                         if duration > 0:
-                            odometry_fps = total / duration
+                            odometry_fps = (total - 1) / duration
                             if odometry_fps > 0.1: # simple sanity check
                                 native_fps = odometry_fps
                     except Exception:
@@ -1594,7 +1652,10 @@ class SfMApp(ctk.CTk):
             parts = []
             total = 0
             for info in self._video_infos:
-                est = int(info["duration"] * fps) if info["duration"] > 0 else 0
+                total_frames = info.get("total_frames", 0)
+                native_fps = info.get("native_fps", fps)
+                step = max(1, round(native_fps / fps)) if fps > 0 else 1
+                est = math.ceil(total_frames / step) if total_frames > 0 else (round(info["duration"] * fps) if info["duration"] > 0 else 0)
                 name = Path(info["path"]).stem
                 if len(name) > 20:
                     name = name[:17] + "…"
@@ -1612,7 +1673,7 @@ class SfMApp(ctk.CTk):
             for info in self._rescan_infos:
                 nat_fps = info.get("native_fps", 30.0)
                 step = max(1, round(nat_fps / fps))
-                est = info.get("total_frames", 0) // step
+                est = math.ceil(info.get("total_frames", 0) / step)
                 name = Path(info["path"]).name
                 if len(name) > 20:
                     name = name[:17] + "…"
@@ -1812,6 +1873,69 @@ class SfMApp(ctk.CTk):
         if self._cancelled:
             raise CancelledError("Processing cancelled by user")
 
+    def _filter_frame_quality(self, image_dir, tag="[CPU]"):
+        """Optionally move blurry/black frames out of the active image set."""
+        def _get_var(name, default):
+            value = getattr(self, name, None)
+            if value is None:
+                return default
+            try:
+                return value.get()
+            except Exception:
+                return default
+
+        reject_blurry = bool(_get_var("exclude_blurry", False))
+        reject_black = bool(_get_var("exclude_black", False))
+        if not (reject_blurry or reject_black):
+            return
+        result = reject_low_quality_frames(
+            image_dir,
+            reject_blurry=reject_blurry,
+            reject_black=reject_black,
+            blur_threshold=float(_get_var("blur_threshold", 75.0)),
+            black_threshold=float(_get_var("black_threshold", 0.08)),
+            logger=lambda msg: self._log_tagged(tag, f"       {msg}"),
+        )
+        if result.get("rejected"):
+            self._log_tagged(tag, f"       -> Quality filter moved {len(result['rejected'])} frame(s) to _rejected_frames")
+
+    def _apply_quality_sweep_sample(self, image_dir, tag="[CPU]"):
+        def _get_var(name, default):
+            value = getattr(self, name, None)
+            if value is None:
+                return default
+            try:
+                return value.get()
+            except Exception:
+                return default
+
+        if not bool(_get_var("quality_sweep", False)):
+            return
+        limit = int(_get_var("sweep_sample_frames", 80))
+        if limit <= 0:
+            return
+        directory = Path(image_dir)
+        images = sorted([
+            path for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr")
+        ])
+        if len(images) <= limit:
+            return
+        keep_indexes = set()
+        if limit == 1:
+            keep_indexes.add(len(images) // 2)
+        else:
+            for idx in range(limit):
+                keep_indexes.add(round(idx * (len(images) - 1) / (limit - 1)))
+        unused_dir = directory / "_sweep_unused_frames"
+        unused_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for idx, path in enumerate(images):
+            if idx not in keep_indexes:
+                shutil.move(str(path), unused_dir / path.name)
+                moved += 1
+        self._log_tagged(tag, f"       -> Quality sweep sampled {len(images) - moved}/{len(images)} frames")
+
     def _finish(self, success=True, cancelled=False):
         if cancelled:
             color = COLORS["warning"]
@@ -1961,13 +2085,18 @@ class SfMApp(ctk.CTk):
             
             _source = self.color_source.get()
             _dest = self.color_dest.get()
+            is_rescan_color = self.input_mode.get() == "Rescan (LiDAR)"
 
             # Resolve "Auto-detect" to the detected profile
             if _source == "Auto-detect":
                 _source = self.detected_color_profile.get()
                 if not _source:
-                    _source = "Linear BT.2020"  # Safe default for ReScan
-                    self._log_tagged(tag_prefix, "       ⚠ No color profile detected, assuming Linear BT.2020")
+                    _source = "Apple Log (BT.2020)" if is_rescan_color else "Linear BT.2020"
+                    self._log_tagged(tag_prefix, f"       ⚠ No color profile detected, assuming {_source}")
+
+            if is_rescan_color and not self.use_acescg_exr.get() and _dest == "ACEScg (EXR + sRGB PNG)":
+                _dest = "sRGB (Tone Mapped)"
+                exr_out_dir = None
 
             self._check_cancelled()
             self._log_tagged(tag_prefix, step_description)
@@ -2002,37 +2131,61 @@ class SfMApp(ctk.CTk):
 
             success_count = 0
             errors = []
-            threads = self.num_workers.get()
-            self._log_tagged(tag_prefix, f"       → Converting {total_color} images with {threads} processes...")
+            try:
+                configured_threads = int(self.num_workers.get())
+            except Exception:
+                configured_threads = 1
+            threads = max(1, configured_threads)
+            self._log_tagged(tag_prefix, f"       -> Converting {total_color} images with {threads} isolated worker process(es)...")
             
             exr_dir_str = str(exr_out_dir) if exr_out_dir else None
 
             with tqdm_module.tqdm(total=total_color, desc="Color Conversion") as pbar:
                 from concurrent.futures import ProcessPoolExecutor, as_completed
+                from concurrent.futures.process import BrokenProcessPool
                 futures = []
-                with ProcessPoolExecutor(max_workers=threads) as executor:
-                    for img_path in all_images:
-                        futures.append(executor.submit(
-                            _process_image_color_worker, 
-                            str(img_path), 
-                            _source, _dest,
-                            cs_in, cs_out, cfg_path, exr_dir_str
-                        ))
-                    
-                    for future in as_completed(futures):
-                        if self._cancelled:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            break
-                        res, err = future.result()
-                        if res:
-                            success_count += 1
-                        else:
-                            if err: errors.append(err)
-                        pbar.update(1)
+                try:
+                    with ProcessPoolExecutor(max_workers=threads) as executor:
+                        for img_path in all_images:
+                            futures.append(executor.submit(
+                                process_image_color_worker,
+                                str(img_path),
+                                _source, _dest,
+                                cs_in, cs_out, cfg_path, exr_dir_str
+                            ))
+
+                        for future in as_completed(futures):
+                            if self._cancelled:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                break
+                            try:
+                                res, err = future.result()
+                            except BrokenProcessPool as e:
+                                res, err = False, f"Native color worker crashed: {e}"
+                            except Exception as e:
+                                res, err = False, str(e)
+                            if res:
+                                success_count += 1
+                            else:
+                                if err:
+                                    errors.append(err)
+                            pbar.update(1)
+                            processed = success_count + len(errors)
+                            if processed % 50 == 0 or processed == total_color:
+                                self._log_tagged(
+                                    tag_prefix,
+                                    f"       -> Color conversion progress: {processed}/{total_color}",
+                                )
+                except BrokenProcessPool as e:
+                    errors.append(f"Native color worker pool crashed: {e}")
 
             if errors:
                 first_few_errors = list(set(errors))[:3]
                 self._log_tagged(tag_prefix, f"       ❌ Encountered {len(errors)} errors. Examples: {first_few_errors}")
+                raise RuntimeError(f"Color conversion failed for {len(errors)} image(s): {first_few_errors}")
+
+            if success_count != total_color:
+                raise RuntimeError(f"Color conversion incomplete: {success_count}/{total_color} images converted")
 
             self._log_tagged(tag_prefix, f"       → OK ({success_count}/{total_color} converted)")
 
@@ -2060,14 +2213,6 @@ class SfMApp(ctk.CTk):
 
             base_out = Path(self.output_path.get())
 
-            images_dir = base_out / "images"
-            outputs_dir = base_out / "hloc_outputs"
-            sfm_dir = base_out / "sparse" / "0"
-
-            images_dir.mkdir(parents=True, exist_ok=True)
-            outputs_dir.mkdir(parents=True, exist_ok=True)
-            sfm_dir.mkdir(parents=True, exist_ok=True)
-
             try:
                 import torch
                 has_gpu = torch.cuda.is_available()
@@ -2087,6 +2232,15 @@ class SfMApp(ctk.CTk):
             is_video_mode = (self.input_mode.get() == "VIDEO" or self.input_mode.get() == "Video (.mp4, .mov)")
             is_stray_mode = (self.input_mode.get() == "Rescan (LiDAR)")
             stray_result = None  # Will hold stray conversion result if applicable
+
+            images_dir = base_out / "images"
+            outputs_dir = base_out / "hloc_outputs"
+            sfm_dir = base_out / "sparse" / "0"
+
+            if not is_stray_mode:
+                images_dir.mkdir(parents=True, exist_ok=True)
+                outputs_dir.mkdir(parents=True, exist_ok=True)
+                sfm_dir.mkdir(parents=True, exist_ok=True)
 
             if is_stray_mode:
                 # ═══ RESCAN MODE — INDEPENDENT PROCESSING PER DATASET ═══
@@ -2113,15 +2267,17 @@ class SfMApp(ctk.CTk):
                 for ds_idx, stray_dir in enumerate(stray_dirs, start=1):
                     self._check_cancelled()
                     ds_name = stray_dir.name
-                    ds_out = base_out / ds_name
+                    ds_out = base_out if total_ds == 1 else base_out / ds_name
                     ds_images = ds_out / "images"
                     ds_hloc = ds_out / "hloc_outputs"
                     ds_sfm = ds_out / "sparse" / "0"
-                    ds_models = ds_sfm / "models" / "0" / "0"
+                    ds_final = ds_out / f"{ds_out.name}_SfM_Dataset_Output"
+                    ds_final_images = ds_final / "images"
                     ds_images.mkdir(parents=True, exist_ok=True)
                     ds_hloc.mkdir(parents=True, exist_ok=True)
                     ds_sfm.mkdir(parents=True, exist_ok=True)
-                    ds_models.mkdir(parents=True, exist_ok=True)
+                    if self.use_acescg_exr.get():
+                        ds_final_images.mkdir(parents=True, exist_ok=True)
 
                     ds_tag = f"[{ds_idx}/{total_ds}]"
                     self._log_tagged("[LiDAR]", f"\n{'═' * 60}")
@@ -2135,7 +2291,12 @@ class SfMApp(ctk.CTk):
 
                     ds_info = next((info for info in self._rescan_infos if info["path"] == str(stray_dir)), None)
                     native_fps = ds_info["native_fps"] if ds_info else 60.0
-                    computed_subsample = max(1, round(native_fps / self.fps_extract.get()))
+                    target_fps = max(float(self.fps_extract.get()), 0.01)
+                    computed_subsample = max(1, round(native_fps / target_fps))
+                    self._log_tagged(
+                        "[LiDAR]",
+                        f"{ds_tag}   Sampling: native {native_fps:.2f} FPS -> target {target_fps:.1f} FPS (step={computed_subsample})",
+                    )
 
                     stray_result = convert_stray_to_colmap(
                         input_dir=stray_dir,
@@ -2147,22 +2308,56 @@ class SfMApp(ctk.CTk):
                         skip_pointcloud=not self.stray_gen_pointcloud.get(),
                         use_cuda=True,
                         image_prefix="",
+                        sfm_source_space=(
+                            self.detected_color_profile.get() or "Auto-detect"
+                            if self.color_source.get() == "Auto-detect"
+                            else self.color_source.get()
+                        ),
                         logger=lambda msg, _t=ds_tag: self._log_tagged("[LiDAR]", f"{_t} {msg}"),
                         cancel_check=self._check_cancelled,
                     )
                     self._log_tagged("[LiDAR]", f"{ds_tag}   ✓ {stray_result['n_images']} images, "
                                      f"{stray_result['n_points']:,} points LiDAR")
 
-                    apply_color_conversion(ds_images, "[CPU]", f"{ds_tag} [*/5] Applying Color Conversion ({self.color_source.get()} → {self.color_dest.get()})...", exr_out_dir=ds_models)
+                    if stray_result.get("has_exr_source", False):
+                        self._log_tagged(
+                            "[CPU]",
+                            f"{ds_tag} [*/5] EXR source detected: using tone-mapped sRGB PNG proxies for SfM; "
+                            "EXR color conversion is deferred until after reconstruction.",
+                        )
+                    else:
+                        apply_color_conversion(
+                            ds_images,
+                            "[CPU]",
+                            f"{ds_tag} [*/5] Applying Color Conversion ({self.color_source.get()} → {self.color_dest.get()})...",
+                            exr_out_dir=ds_final_images if self.use_acescg_exr.get() else None,
+                        )
 
                     # ── Step 2: Features ──
+                    self._filter_frame_quality(ds_images, "[CPU]")
+                    self._apply_quality_sweep_sample(ds_images, "[CPU]")
                     self._check_cancelled()
                     self._set_step(1)
                     device_str = "[GPU]" if torch.cuda.is_available() else "[CPU]"
                     gui_handler.set_tag(device_str)
+                    matcher_name = self.matcher_type.get()
+                    loma_pipeline = (
+                        LoMaMatcher(
+                            matcher_name,
+                            max_keypoints=int(self.max_keypoints.get()),
+                            logger=lambda msg, _t=ds_tag, _d=device_str: self._log_tagged(_d, f"{_t} {msg}"),
+                            cancel_check=self._check_cancelled,
+                        )
+                        if is_loma_matcher(matcher_name)
+                        else None
+                    )
 
-                    ds_features_out = ds_hloc / 'features.h5'
-                    if ds_features_out.exists():
+                    ds_features_out = loma_feature_path(ds_hloc, matcher_name) if loma_pipeline else ds_hloc / 'features.h5'
+                    if loma_pipeline is not None:
+                        self._log_tagged(device_str, f"{ds_tag} [2/5] LoMa feature cache - {matcher_name} (max {self.max_keypoints.get()})...")
+                        ds_features_path = loma_pipeline.extract_features(ds_images, ds_features_out)
+                        self._log_tagged(device_str, f"{ds_tag}   LoMa features ready")
+                    elif ds_features_out.exists():
                         self._log_tagged(device_str, f"{ds_tag} [2/5] Features skipped (already present)")
                         ds_features_path = ds_features_out
                     else:
@@ -2181,21 +2376,31 @@ class SfMApp(ctk.CTk):
                     pair_mode = self.pairing_mode.get()
                     ds_pairs_path = ds_hloc / 'pairs.txt'
                     if ds_pairs_path.exists():
-                        self._log_tagged("[CPU]", f"{ds_tag} [3/5] Pairs skipped (already present)")
+                        _pair_count = count_pairs_file(ds_pairs_path)
+                        self._log_tagged("[CPU]", f"{ds_tag} [3/5] Pairs skipped ({_pair_count} pairs already present)")
                     else:
                         self._log_tagged("[CPU]", f"{ds_tag} [3/5] Pairs — {pair_mode}...")
                         if "Sequential" in pair_mode:
-                            generate_sequential_pairs(ds_images, ds_pairs_path, overlap=20)
+                            _pair_count = generate_sequential_pairs(ds_images, ds_pairs_path, overlap=20)
                         else:
                             pairs_from_exhaustive.main(ds_pairs_path, image_list=None, features=ds_features_path)
-                        self._log_tagged("[CPU]", f"{ds_tag}   ✓ Pairs generated")
+                            _pair_count = count_pairs_file(ds_pairs_path)
+                        self._log_tagged("[CPU]", f"{ds_tag}   ✓ {_pair_count} pairs generated")
+                    self.after(0, lambda _n=_pair_count, _t=ds_tag: self.step_label.configure(
+                        text=f"{_t} Pairs: {_n} pairs (100%)",
+                        text_color=COLORS["accent_blue"],
+                    ))
 
                     # ── Step 4: Matching ──
                     self._check_cancelled()
                     self._set_step(3)
                     gui_handler.set_tag(device_str)
-                    ds_matches_out = ds_hloc / 'matches.h5'
-                    if ds_matches_out.exists():
+                    ds_matches_out = loma_matches_path(ds_hloc, matcher_name) if loma_pipeline else ds_hloc / 'matches.h5'
+                    if loma_pipeline is not None:
+                        self._log_tagged(device_str, f"{ds_tag} [4/5] Matching - {matcher_name}...")
+                        ds_matches_path = loma_pipeline.match_pairs(ds_pairs_path, ds_features_path, ds_matches_out)
+                        self._log_tagged(device_str, f"{ds_tag}   LoMa matching complete")
+                    elif ds_matches_out.exists():
                         self._log_tagged(device_str, f"{ds_tag} [4/5] Matching skipped (already present)")
                         ds_matches_path = ds_matches_out
                     else:
@@ -2260,7 +2465,7 @@ class SfMApp(ctk.CTk):
                             camera_mode=pycolmap.CameraMode.AUTO,
                             camera_model="PINHOLE",
                             mapper_type=self.mapper_type.get(),
-                            shared_dir=None,
+                            shared_dir=ds_out / "live_reconstruction",
                             export_every=5,
                             cancel_check=self._check_cancelled,
                             logger=tagged_logger,
@@ -2269,7 +2474,7 @@ class SfMApp(ctk.CTk):
                         self._log_tagged(sfm_tag, f"{ds_tag}   ✓ Reconstruction complete")
 
                     # ── EXR remapping (when source was EXR image sequence) ──
-                    if stray_result and stray_result.get("has_exr_source", False):
+                    if stray_result and stray_result.get("has_exr_source", False) and self.use_acescg_exr.get():
                         gui_handler.set_tag("[CPU]")
                         self._log_tagged("[CPU]", f"{ds_tag} EXR remapping: replacing PNG with "
                                          "colorspace-converted source EXR files...")
@@ -2304,7 +2509,7 @@ class SfMApp(ctk.CTk):
                                 shutil.move(str(_exr_f), ds_images / _exr_f.name)
                         # Rename image entries in sparse model (png → exr)
                         try:
-                            from remap_server import _read_images_bin, _write_images_bin
+                            from backend.colmap_images import read_images_bin as _read_images_bin, write_images_bin as _write_images_bin
                             _bin_path = ds_sfm / "images.bin"
                             if _bin_path.exists():
                                 _images_data = _read_images_bin(_bin_path)
@@ -2333,11 +2538,26 @@ class SfMApp(ctk.CTk):
                         self._log_tagged("[CPU]", f"{ds_tag}   → {_deleted} intermediate PNG "
                                          "file(s) removed")
                         self._log_tagged("[CPU]", f"{ds_tag}   ✓ EXR remapping complete")
+                    try:
+                        final_bundle = normalize_final_bundle(
+                            ds_out,
+                            keep_srgb_png=False,
+                            use_acescg_exr=self.use_acescg_exr.get(),
+                        )
+                        if final_bundle:
+                            self._log_tagged("[CPU]", f"{ds_tag}   -> Final SfM dataset output: {final_bundle.name}")
+                    except Exception as _bundle_exc:
+                        self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not build final SfM dataset output: {_bundle_exc}")
+
+                    self._log_tagged("[OK]", f"{ds_tag} ✓ Dataset {ds_name} complete -> {ds_out}")
+                    continue
+
                     # Move images/ into sparse/0/models/0/0/
                     shutil.move(str(ds_images), str(ds_models))
                     self._log_tagged("[CPU]", f"{ds_tag}   → images/ moved to {ds_models.relative_to(ds_out)}")
                     # Update sparse model so image paths point to new location
                     try:
+                        from backend.colmap_images import read_images_bin as _read_images_bin, write_images_bin as _write_images_bin
                         _prefix = "models/0/0/images/"
                         _bin_path = ds_sfm / "images.bin"
                         if _bin_path.exists():
@@ -2361,10 +2581,20 @@ class SfMApp(ctk.CTk):
                     # Copy the updated .bin files into models/0/0/ so that directory
                     # contains the fully up-to-date reconstruction (EXR names + prefix),
                     # overwriting any stale SfM output that may have been left there.
-                    for _bin_fname in ("cameras.bin", "images.bin", "points3D.bin"):
+                    for _bin_fname in ("cameras.bin", "images.bin", "points3D.bin", "frames.bin", "rigs.bin"):
                         _src_bin = ds_sfm / _bin_fname
                         if _src_bin.exists():
                             shutil.copy2(str(_src_bin), str(ds_models / _bin_fname))
+                    try:
+                        from backend.colmap_images import normalize_images_bin_for_image_dir
+                        normalize_images_bin_for_image_dir(
+                            ds_models / "images.bin",
+                            ds_models / "images",
+                            "images/",
+                            lambda msg, _t=ds_tag: self._log_tagged("[CPU]", f"{_t}   {msg.strip()}"),
+                        )
+                    except Exception as _exc3:
+                        self._log_tagged("[CPU]", f"{ds_tag}   ⚠ Could not normalize final images.bin: {_exc3}")
                     self._log_tagged("[CPU]", f"{ds_tag}   → Updated sparse .bin files copied to {ds_models.relative_to(ds_out)}")
                     # Clean up non-essential intermediate files and stale
                     # text-format sparse model files (only binary .bin files
@@ -2381,7 +2611,7 @@ class SfMApp(ctk.CTk):
                         # Remove stale SfM output in models/0/ (GLOMAP copies)
                         _sfm_model0 = ds_sfm / "models" / "0"
                         if _sfm_model0.is_dir():
-                            for _stale in ("cameras.bin", "images.bin", "points3D.bin"):
+                            for _stale in ("cameras.bin", "images.bin", "points3D.bin", "frames.bin", "rigs.bin"):
                                 _sf = _sfm_model0 / _stale
                                 if _sf.exists():
                                     try:
@@ -2396,6 +2626,15 @@ class SfMApp(ctk.CTk):
                         self._log_tagged("[CPU]", f"{ds_tag}   → Intermediate files cleaned up from sparse/0/")
 
                     self._log_tagged("[OK]", f"{ds_tag} ✓ Dataset {ds_name} complete → {ds_out}")
+
+                if total_ds > 1:
+                    for _empty_name in ("images", "hloc_outputs", "sparse"):
+                        _empty_dir = base_out / _empty_name
+                        try:
+                            if _empty_dir.is_dir() and not any(_empty_dir.iterdir()):
+                                _empty_dir.rmdir()
+                        except Exception:
+                            pass
 
                 self._log_tagged("[OK]", f"\n✓ SUCCESS — {total_ds} dataset(s) processed independently in: {base_out}")
                 self._finish(success=True)
@@ -2487,7 +2726,12 @@ class SfMApp(ctk.CTk):
                         # Find native_fps to compute step (to avoid VFR sync issues)
                         vid_info = next((info for info in self._video_infos if info["path"] == str(video)), None)
                         native_fps = vid_info["native_fps"] if vid_info else 30.0
-                        step = max(1, round(native_fps / self.fps_extract.get()))
+                        target_fps = max(float(self.fps_extract.get()), 0.01)
+                        step = max(1, round(native_fps / target_fps))
+                        self._log_tagged(
+                            accel_tag,
+                            f"         Sampling: native {native_fps:.2f} FPS -> target {target_fps:.1f} FPS (step={step})",
+                        )
                         
                         vf_args = ["-vf", f"select='not(mod(n\\,{step}))',setpts=N/FRAME_RATE/TB", "-vsync", "vfr"] if step > 1 else []
                         
@@ -2572,8 +2816,62 @@ class SfMApp(ctk.CTk):
                     total_imgs = len([f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png')])
                     self._log_tagged(accel_tag, f"       ✓ Extraction complete — {total_imgs} images total")
 
-            # --- 1.5 COLOR CONVERSION ---
-            if self.color_enabled.get():
+            # --- 1.5 COLOR CONVERSION (SfM proxy) ---
+            if self.color_enabled.get() and is_video_mode:
+                # Video mode with color conversion: convert extracted frames
+                # to tone-mapped sRGB PNGs so SfM operates on display-referred
+                # images.  The actual output conversion (EXR) happens after SfM.
+                color_step_idx = 1
+                GUIProgressTqdm._step_index = color_step_idx
+                GUIProgressTqdm._step_name = "Color → sRGB proxy"
+                _source = self.color_source.get()
+                if _source == "Auto-detect":
+                    _source = self.detected_color_profile.get()
+                    if not _source:
+                        _source = "Linear BT.2020"
+                        self._log_tagged("[CPU]", f"       ⚠ No color profile detected, assuming {_source}")
+                self._log_tagged("[CPU]", f"[{color_step_idx+1}/{len(self.STEPS)}] Converting frames to sRGB proxy for SfM ({_source} → sRGB)...")
+                exts_proxy = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
+                proxy_images = sorted([
+                    p for p in images_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in exts_proxy
+                ])
+                if proxy_images:
+                    try:
+                        configured_threads = int(self.num_workers.get())
+                    except Exception:
+                        configured_threads = 1
+                    threads = max(1, configured_threads)
+                    self._log_tagged("[CPU]", f"       → Converting {len(proxy_images)} frames with {threads} process(es)...")
+                    from concurrent.futures import ProcessPoolExecutor, as_completed
+                    from concurrent.futures.process import BrokenProcessPool
+                    _proxy_ok = 0
+                    _proxy_errs = []
+                    try:
+                        with ProcessPoolExecutor(max_workers=threads) as executor:
+                            _futs = [
+                                executor.submit(convert_frame_to_srgb_proxy_worker, str(p), _source, self.color_dest.get(), self.ocio_in_cs.get(), self.ocio_out_cs.get(), self.ocio_path.get())
+                                for p in proxy_images
+                            ]
+                            for fut in as_completed(_futs):
+                                if self._cancelled:
+                                    executor.shutdown(wait=False, cancel_futures=True)
+                                    break
+                                try:
+                                    ok, err = fut.result()
+                                except (BrokenProcessPool, Exception) as e:
+                                    ok, err = False, str(e)
+                                if ok:
+                                    _proxy_ok += 1
+                                elif err:
+                                    _proxy_errs.append(err)
+                    except BrokenProcessPool as e:
+                        _proxy_errs.append(f"Worker pool crashed: {e}")
+                    if _proxy_errs:
+                        self._log_tagged("[CPU]", f"       ❌ {len(_proxy_errs)} proxy conversion error(s): {list(set(_proxy_errs))[:3]}")
+                    self._log_tagged("[CPU]", f"       ✓ {_proxy_ok}/{len(proxy_images)} frames converted to sRGB proxy")
+            elif self.color_enabled.get() and not is_video_mode and not is_stray_mode:
+                # Image mode: apply color conversion in-place (legacy behavior)
                 color_step_idx = 1
                 GUIProgressTqdm._step_index = color_step_idx
                 GUIProgressTqdm._step_name = "Color Conversion"
@@ -2583,15 +2881,33 @@ class SfMApp(ctk.CTk):
 
             if not is_stray_mode:
                 # ═══ SHARED PIPELINE (Video / Images modes only) ═══
+                self._filter_frame_quality(images_dir, "[CPU]")
+                self._apply_quality_sweep_sample(images_dir, "[CPU]")
+
                 # 2. FEATURES
                 self._check_cancelled()
                 self._set_step(1)
                 
                 device_str = "[GPU]" if torch.cuda.is_available() else "[CPU]"
                 gui_handler.set_tag(device_str)
-                
-                features_out = outputs_dir / 'features.h5'
-                if features_out.exists():
+                matcher_name = self.matcher_type.get()
+                loma_pipeline = (
+                    LoMaMatcher(
+                        matcher_name,
+                        max_keypoints=int(self.max_keypoints.get()),
+                        logger=lambda msg, _d=device_str: self._log_tagged(_d, msg),
+                        cancel_check=self._check_cancelled,
+                    )
+                    if is_loma_matcher(matcher_name)
+                    else None
+                )
+                 
+                features_out = loma_feature_path(outputs_dir, matcher_name) if loma_pipeline else outputs_dir / 'features.h5'
+                if loma_pipeline is not None:
+                    self._log_tagged(device_str, f"[2/5] LoMa feature cache - {matcher_name} (max {self.max_keypoints.get()})...")
+                    features_path = loma_pipeline.extract_features(images_dir, features_out)
+                    self._log_tagged(device_str, "       LoMa features ready")
+                elif features_out.exists():
                     self._log_tagged(device_str, f"[2/5] Features skipped (already present: {features_out.name})")
                     features_path = features_out
                 else:
@@ -2610,21 +2926,31 @@ class SfMApp(ctk.CTk):
                 mode = self.pairing_mode.get()
                 pairs_path = outputs_dir / 'pairs.txt'
                 if pairs_path.exists():
-                    self._log_tagged("[CPU]", f"[3/5] Pairs skipped (already present)")
+                    _pair_count = count_pairs_file(pairs_path)
+                    self._log_tagged("[CPU]", f"[3/5] Pairs skipped ({_pair_count} pairs already present)")
                 else:
                     self._log_tagged("[CPU]", f"[3/5] Pairs — {mode}...")
                     if "Sequential" in mode:
-                        generate_sequential_pairs(images_dir, pairs_path, overlap=20)
+                        _pair_count = generate_sequential_pairs(images_dir, pairs_path, overlap=20)
                     else:
                         pairs_from_exhaustive.main(pairs_path, image_list=None, features=features_path)
-                    self._log_tagged("[CPU]", "       ✓ Pairs generated")
+                        _pair_count = count_pairs_file(pairs_path)
+                    self._log_tagged("[CPU]", f"       ✓ {_pair_count} pairs generated")
+                self.after(0, lambda _n=_pair_count: self.step_label.configure(
+                    text=f"Pairs: {_n} pairs (100%)",
+                    text_color=COLORS["accent_blue"],
+                ))
 
                 # 4. MATCHING
                 self._check_cancelled()
                 self._set_step(3)
                 gui_handler.set_tag(device_str) # Re-use GPU/CPU tag
-                matches_out = outputs_dir / 'matches.h5'
-                if matches_out.exists():
+                matches_out = loma_matches_path(outputs_dir, matcher_name) if loma_pipeline else outputs_dir / 'matches.h5'
+                if loma_pipeline is not None:
+                    self._log_tagged(device_str, f"[4/5] Matching - {matcher_name}...")
+                    matches_path = loma_pipeline.match_pairs(pairs_path, features_path, matches_out)
+                    self._log_tagged(device_str, "       LoMa matching complete")
+                elif matches_out.exists():
                     self._log_tagged(device_str, f"[4/5] Matching skipped (already present: {matches_out.name})")
                     matches_path = matches_out
                 else:
@@ -2665,13 +2991,157 @@ class SfMApp(ctk.CTk):
                     camera_mode=pycolmap.CameraMode.AUTO,
                     camera_model=cam_model,
                     mapper_type=self.mapper_type.get(),
-                    shared_dir=None,
+                    shared_dir=base_out / "live_reconstruction",
                     export_every=5,
                     cancel_check=self._check_cancelled,
                     logger=tagged_logger,
                     num_threads=self.num_workers.get(),
                 )
                 self._log_tagged(sfm_tag, "       ✓ Reconstruction complete")
+
+                # ── Post-SfM: EXR output conversion (video mode + color enabled) ──
+                if self.color_enabled.get() and is_video_mode:
+                    self._check_cancelled()
+                    _dest = self.color_dest.get()
+                    _source = self.color_source.get()
+                    if _source == "Auto-detect":
+                        _source = self.detected_color_profile.get() or "Linear BT.2020"
+                    
+                    _cs_in = self.ocio_in_cs.get() if _dest == "Custom OCIO..." else None
+                    _cs_out = self.ocio_out_cs.get() if _dest == "Custom OCIO..." else None
+                    _cfg_path = self.ocio_path.get() if _dest == "Custom OCIO..." else None
+                    
+                    self._log_tagged("[CPU]", f"\n       ── Post-SfM: Re-extracting frames & converting to output EXR ({_source} → {_dest}) ──")
+
+                    # Create final output directory for EXR files
+                    ds_final = base_out / f"{base_out.name}_SfM_Dataset_Output"
+                    ds_final_images = ds_final / "images"
+                    ds_final_images.mkdir(parents=True, exist_ok=True)
+
+                    # Re-extract the same sub-sampled frames from video as 16-bit PNGs
+                    # into a temporary directory, then convert each to the output EXR.
+                    with tempfile.TemporaryDirectory() as _raw_tmpdir:
+                        _raw_tmp = Path(_raw_tmpdir)
+                        videos = self.video_paths
+                        for vid_idx, video in enumerate(videos, start=1):
+                            self._check_cancelled()
+                            prefix = f"vid{vid_idx:02d}"
+                            vid_info = next((info for info in self._video_infos if info["path"] == str(video)), None)
+                            native_fps = vid_info["native_fps"] if vid_info else 30.0
+                            target_fps = max(float(self.fps_extract.get()), 0.01)
+                            step = max(1, round(native_fps / target_fps))
+                            vf_filter = f"select='not(mod(n\\,{step}))',setpts=N/FRAME_RATE/TB"
+                            vf_args = ["-vf", vf_filter, "-vsync", "vfr"] if step > 1 else []
+                            cmd_raw = [
+                                "ffmpeg", "-y",
+                                "-i", str(video),
+                                *vf_args,
+                                "-pix_fmt", "rgb48be",
+                                str(_raw_tmp / f"{prefix}_%04d.png")
+                            ]
+                            self._log_tagged("[CPU]", f"       Re-extracting {video.name} (16-bit raw, step={step})...")
+                            proc, stderr_lines, reader_thread = self._run_ffmpeg_streamed(cmd_raw, "[CPU]")
+                            while proc.poll() is None:
+                                if self._cancelled:
+                                    proc.kill()
+                                    proc.wait()
+                                    reader_thread.join(timeout=2)
+                                    raise CancelledError("Processing cancelled by user")
+                                time.sleep(0.25)
+                            reader_thread.join(timeout=5)
+                            if proc.returncode != 0:
+                                self._log_tagged("[ERR]", f"       FFmpeg re-extraction failed for {video.name}")
+                                continue
+
+                        # Collect all re-extracted raw frames
+                        raw_frames = sorted([
+                            p for p in _raw_tmp.iterdir()
+                            if p.is_file() and p.suffix.lower() == ".png"
+                        ])
+                        self._log_tagged("[CPU]", f"       → {len(raw_frames)} raw frames re-extracted for EXR conversion")
+
+                        # Match raw frames to the SfM proxy frames by sorted order
+                        sfm_proxy_frames = sorted([
+                            p for p in images_dir.iterdir()
+                            if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg")
+                        ])
+
+                        # Convert each raw frame to the output color space as EXR
+                        try:
+                            configured_threads = int(self.num_workers.get())
+                        except Exception:
+                            configured_threads = 1
+                        threads = max(1, configured_threads)
+                        self._log_tagged("[CPU]", f"       → Converting {len(raw_frames)} frames to {_dest} EXR with {threads} process(es)...")
+                        from concurrent.futures import ProcessPoolExecutor, as_completed
+                        from concurrent.futures.process import BrokenProcessPool
+                        _exr_ok = 0
+                        _exr_errs = []
+                        # Build mapping: raw frame -> EXR output path (using SfM proxy name)
+                        _exr_tasks = []
+                        for idx, raw_path in enumerate(raw_frames):
+                            if idx < len(sfm_proxy_frames):
+                                exr_name = sfm_proxy_frames[idx].stem + ".exr"
+                            else:
+                                exr_name = raw_path.stem + ".exr"
+                            exr_out = ds_final_images / exr_name
+                            _exr_tasks.append((str(raw_path), str(exr_out), _source, _dest, _cs_in, _cs_out, _cfg_path))
+                        try:
+                            with ProcessPoolExecutor(max_workers=threads) as executor:
+                                _futs = [
+                                    executor.submit(convert_frame_to_output_exr_worker, *args)
+                                    for args in _exr_tasks
+                                ]
+                                for fut in as_completed(_futs):
+                                    if self._cancelled:
+                                        executor.shutdown(wait=False, cancel_futures=True)
+                                        break
+                                    try:
+                                        ok, err = fut.result()
+                                    except (BrokenProcessPool, Exception) as e:
+                                        ok, err = False, str(e)
+                                    if ok:
+                                        _exr_ok += 1
+                                    elif err:
+                                        _exr_errs.append(err)
+                        except BrokenProcessPool as e:
+                            _exr_errs.append(f"Worker pool crashed: {e}")
+                        if _exr_errs:
+                            self._log_tagged("[CPU]", f"       ❌ {len(_exr_errs)} EXR conversion error(s): {list(set(_exr_errs))[:3]}")
+                        self._log_tagged("[CPU]", f"       ✓ {_exr_ok}/{len(raw_frames)} EXR files written to {ds_final_images}")
+
+                    # Update images.bin in sparse model: rename .png -> .exr
+                    try:
+                        from backend.colmap_images import read_images_bin as _read_images_bin, write_images_bin as _write_images_bin
+                        _bin_path = sfm_dir / "images.bin"
+                        if _bin_path.exists():
+                            _images_data = _read_images_bin(_bin_path)
+                            _renamed = 0
+                            for _img in _images_data:
+                                for _ext in (".png", ".jpg", ".jpeg"):
+                                    if _img["name"].lower().endswith(_ext):
+                                        _img["name"] = _img["name"][:-(len(_ext))] + ".exr"
+                                        _renamed += 1
+                                        break
+                            if _renamed > 0:
+                                _write_images_bin(_bin_path, _images_data)
+                                self._log_tagged("[CPU]", f"       → Sparse model updated: {_renamed} image reference(s) renamed to .exr")
+                        else:
+                            self._log_tagged("[CPU]", "       ⚠ images.bin not found in sparse/0")
+                    except Exception as _exc:
+                        self._log_tagged("[CPU]", f"       ⚠ Could not update sparse model image names: {_exc}")
+
+                    self._log_tagged("[CPU]", "       ✓ Post-SfM EXR conversion complete")
+
+                try:
+                    normalize_final_bundle(
+                        base_out,
+                        keep_srgb_png=self.color_enabled.get() and is_video_mode,
+                        use_acescg_exr=self.use_acescg_exr.get(),
+                    )
+                    self._log_tagged("[CPU]", "       -> Final bundle normalized; images.bin patched")
+                except Exception as _bundle_exc:
+                    self._log_tagged("[CPU]", f"       ⚠ Could not normalize final bundle: {_bundle_exc}")
 
                 self._log_tagged("[OK]", f"\n✓ SUCCESS — Dataset ready: {base_out}")
                 self._finish(success=True)
